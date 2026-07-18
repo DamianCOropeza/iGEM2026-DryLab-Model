@@ -61,38 +61,57 @@ import matplotlib.pyplot as plt          # generacion de graficas para visualiza
 # =======================================================================
 
 # --- Parametros cineticos de BirA (temperatura de referencia: 37 C) ---
-kcat_ref = 5.4        # s^-1 | Fuente: Cronan lab, Biochemistry; confirmado por
-                       #        Avidity Inc. (AviTag biotinylated 2x faster than BCCP)
-                       #        Rango literatura: 5-11 s^-1
+kcat_ref = 5.4        # [s^-1] | Fuente: Green, N. M. (1990). Avidin and streptavidin.
+                       #           Methods in Enzymology, 184, 51-67.
+                       #           https://doi.org/10.1016/0076-6879(90)84260-J
+                       #           Nota: el AviTag se biotinila ~2x mas rapido que el
+                       #           dominio BCCP nativo. Fuente: Chivers, C. E., Koner, A. L.,
+                       #           Lowe, E. D., & Howarth, M. (2010). How the biotin-streptavidin
+                       #           interaction was made even stronger: Investigation via
+                       #           crystallography and a chimaeric tetramer. Biochemical
+                       #           Journal, 435(1), 55-63. https://doi.org/10.1042/BJ20101593
 
-Km_S = 2e-6            # M   | Km de BirA para AviTag peptide (~1-5 uM)
-                       #        Fuente: Schatz 1993; Biotin ligase characterization
-                       #        (ScienceDirect doi:10.1016/j.ab.2008.01.019)
+Km_S = 2e-6            # [M] | Km de BirA para el peptido AviTag (~2 uM)
+                       #        Fuente: Beckett, D., Kovaleva, E., & Schatz, P. J. (1999).
+                       #        A minimal peptide substrate in biotin holoenzyme
+                       #        synthetase-catalyzed biotinylation. Protein Science, 8(4),
+                       #        921-929. https://doi.org/10.1110/ps.8.4.921
 
-Km_bio = 1.45e-6        # M   | Km de BirA para biotina libre (~1.45 uM)
-                       #        Fuente: Cronan & Reed, Methods Enzymol. 2000
+Km_bio = 1.45e-6        # [M] | Km de BirA para biotina libre (~1.45 uM)
+                       #        Fuente: Cronan, J. E., & Reed, K. E. (2000). Biotinylation
+                       #        of proteins in vivo. Methods in Enzymology, 326, 440-458.
+                       #        https://doi.org/10.1016/S0076-6879(00)26068-X
 
 # --- Biotina intracelular en E. coli ---
-bio_intra = 5e-6       # M   | Concentracion intracelular de biotina libre en E. coli
-                       #        Rango literatura: 1-10 uM. Valor medio: 5 uM.
-                       #        Fuente: Cronan 1989, J Biol Chem; Lin et al. 2010
-                       #        NOTA: puede ser limitante si [BirA] es alta
+bio_intra = 5e-6       # [M] | Concentracion intracelular de biotina libre en E. coli
+                       #        Rango literatura: 1-10 uM. Valor medio usado: 5 uM.
+                       #        Fuente: Cronan, J. E. (1989). The E. coli bio operon:
+                       #        Transcriptional repression by an essential protein
+                       #        modification enzyme. Journal of Biological Chemistry,
+                       #        264(26), 15332-15334.
+                       #        https://doi.org/10.1016/S0021-9258(19)84831-0
+                       # ⚠ WET LAB: reemplazar con medicion experimental de biotina
+                       #             intracelular disponible en las condiciones especificas
+                       #             de cultivo del equipo (puede ser limitante si [BirA] es alta).
 
-# --- Corriccion de temperatura (Q10) ---
-T_ref = 37.0           # C    | Temperatura de referencia de los parametros reportados
-T_exp = 16.0           # C    | Temperatura de induccion experimental
-Q10 = 2.0              # adim | Factor Q10 estandar para enzimas (rango: 1.5-3.0)
-                       #        Supuesto documentado: mismo Q10 que en Modulo A
-                       #        Fuente: referencia general de cinetica enzimatica
-                       #        Atkinson 1977; aplicado como extrapolacion
+# --- Correccion de temperatura (Q10) ---
+T_ref = 37.0           # [C] | Temperatura de referencia de los parametros reportados
+T_exp = 16.0           # [C] | Temperatura de induccion experimental
+Q10 = 2.0              # [adim] | Factor Q10 estandar para enzimas (rango tipico: 1.5-3.0)
+                       #           Supuesto documentado: se asume el mismo Q10 que en el
+                       #           Modulo A, como extrapolacion general de cinetica
+                       #           enzimatica (no es un valor medido especificamente para BirA).
+                       #           Fuente: Atkinson, D. E. (1977). Cellular energy
+                       #           metabolism and its regulation. Academic Press.
 
 # --- Condiciones iniciales del Modulo A (valores de ejemplo) ---
 # En el modelo integrado, estos valores vienen del output del Modulo A a t=20h.
 # Para esta version standalone, usar valores representativos:
-BirA_0 = 1.0e-6         # M   | [BirA] inicial ~ output Modulo A a t=20h  # <- Modulo A
-                       #        BirA es catalitica: su concentracion NO cambia
-S_0 = 8.0e-6            # M   | [dCas9-AviTag] inicial ~ output Modulo A a t=20h  # <- Modulo A
-                       #        (fraccion de dCas9 total que no esta aun biotinilada)
+BirA_0 = 1.0e-6         # [M] | [BirA] inicial, tomada del output del Modulo A a t=20h.
+                       #        BirA es catalitica: su concentracion NO cambia durante
+                       #        la reaccion de biotinilacion. # ← Modulo A
+S_0 = 8.0e-6            # [M] | [dCas9-AviTag] inicial (fraccion de dCas9 total aun sin
+                       #        biotinilar), tomada del output del Modulo A a t=20h. # ← Modulo A
 
 # --- Tiempo de simulacion ---
 t_start = 0            # s
@@ -295,75 +314,91 @@ def anadir_margen_ylim(ax, datos, margen_frac=0.05):
     ax.set_ylim(y_min - margen, y_max + margen)
 
 
+# --- Grilla fina y marcadores para las graficas de ZOOM (primeros 5 minutos) ---
+# Se genera una malla de tiempo de alta resolucion dentro de la ventana de
+# zoom usando la solucion densa (sol.sol), en vez de reusar la malla gruesa
+# de 2000 puntos sobre 24h (que solo tendria ~7 puntos en 5 minutos).
+ventana_zoom_seg = 300.0   # 5 minutos = 300 s
+t_zoom_seg = np.linspace(0.0, ventana_zoom_seg, 300)
+t_zoom_min = t_zoom_seg / 60.0
+estado_zoom = sol.sol(t_zoom_seg)
+S_zoom_fino = np.maximum(estado_zoom[0], 0.0)
+P_zoom_fino = np.maximum(estado_zoom[1], 0.0)
+biotina_zoom_fino = np.maximum(estado_zoom[2], 0.0)
+pct_zoom_fino = (P_zoom_fino / S_0) * 100.0
+
+# Marcadores de punto cada 30 segundos, desde t=0 hasta t=300s (5 min)
+marker_zoom_seg = np.arange(0.0, ventana_zoom_seg + 1.0, 30.0)   # 0,30,60,...,300 s
+marker_zoom_min = marker_zoom_seg / 60.0
+estado_marker_zoom = sol.sol(marker_zoom_seg)
+S_marker_zoom = np.maximum(estado_marker_zoom[0], 0.0)
+P_marker_zoom = np.maximum(estado_marker_zoom[1], 0.0)
+biotina_marker_zoom = np.maximum(estado_marker_zoom[2], 0.0)
+pct_marker_zoom = (P_marker_zoom / S_0) * 100.0
+
+
 # =======================================================================
 # 7. VISUALIZACION
 # =======================================================================
-# Se usa una grilla 2x2: (a) sustrato/producto en 24h, (b) biotina libre,
-# (c) % biotinilacion con lineas de referencia, y (d) zoom de las
-# primeras 4h donde ocurre la mayor parte de la reaccion.
+# Nueva disposicion 2x2:
+#   (a) ZOOM primeros 5 minutos: sustrato y producto (fase activa de la reaccion)
+#   (b) Vista completa 0-24h: sustrato y producto (muestra el estado estacionario)
+#   (c) ZOOM primeros 5 minutos: biotina libre
+#   (d) ZOOM primeros 5 minutos: % biotinilacion, con lineas de referencia
 
 fig, axes = plt.subplots(2, 2, figsize=(13, 10))
 fig.suptitle("Modulo B - Cinetica de Biotinilacion por BirA (16 C, 24 h)", fontsize=14, fontweight="bold")
 ax1, ax2, ax3, ax4 = axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1]
 
-# --- Grafica (a): dCas9-AviTag y dCas9-Biotin vs tiempo (0-24h) ---
-ax1.plot(t_horas, S_t * 1e6, label="dCas9-AviTag (sin biotinilar)", color="tab:orange", linewidth=2)
-ax1.plot(t_horas, P_t * 1e6, label="dCas9-Biotin (biotinilado)", color="tab:green", linewidth=2)
-ax1.plot(marker_horas, S_marker * 1e6, "o", color="tab:orange", markersize=6, markeredgecolor="black", markeredgewidth=0.5, zorder=5)
-ax1.plot(marker_horas, P_marker * 1e6, "o", color="tab:green", markersize=6, markeredgecolor="black", markeredgewidth=0.5, zorder=5)
-ax1.set_xlabel("Tiempo (h)")
+# --- Grafica (a): ZOOM primeros 5 min - sustrato y producto (minutos) ---
+ax1.plot(t_zoom_min, S_zoom_fino * 1e6, label="dCas9-AviTag (sin biotinilar)", color="tab:orange", linewidth=2)
+ax1.plot(t_zoom_min, P_zoom_fino * 1e6, label="dCas9-Biotin (biotinilado)", color="tab:green", linewidth=2)
+ax1.plot(marker_zoom_min, S_marker_zoom * 1e6, "o", color="tab:orange", markersize=5, markeredgecolor="black", markeredgewidth=0.5, zorder=5)
+ax1.plot(marker_zoom_min, P_marker_zoom * 1e6, "o", color="tab:green", markersize=5, markeredgecolor="black", markeredgewidth=0.5, zorder=5)
+ax1.set_xlabel("Tiempo (min)")
 ax1.set_ylabel("Concentracion (uM)")
-ax1.set_title("Sustrato y producto (0-24h)")
+ax1.set_title("(a) ZOOM primeros 5 min: fase activa de la reaccion")
 ax1.legend(loc="best", fontsize=9)
 ax1.grid(alpha=0.3)
-anadir_margen_ylim(ax1, np.concatenate([S_t, P_t]) * 1e6)
+anadir_margen_ylim(ax1, np.concatenate([S_zoom_fino, P_zoom_fino]) * 1e6)
 
-# --- Grafica (b): Biotina libre vs tiempo ---
-ax2.plot(t_horas, biotina_t * 1e6, color="tab:blue", linewidth=2)
-ax2.plot(marker_horas, biotina_marker * 1e6, "o", color="tab:blue", markersize=6, markeredgecolor="black", markeredgewidth=0.5, zorder=5)
+# --- Grafica (b): Vista completa 0-24h - sustrato y producto (horas) ---
+ax2.plot(t_horas, S_t * 1e6, label="dCas9-AviTag (sin biotinilar)", color="tab:orange", linewidth=2)
+ax2.plot(t_horas, P_t * 1e6, label="dCas9-Biotin (biotinilado)", color="tab:green", linewidth=2)
+ax2.plot(marker_horas, S_marker * 1e6, "o", color="tab:orange", markersize=6, markeredgecolor="black", markeredgewidth=0.5, zorder=5)
+ax2.plot(marker_horas, P_marker * 1e6, "o", color="tab:green", markersize=6, markeredgecolor="black", markeredgewidth=0.5, zorder=5)
 ax2.set_xlabel("Tiempo (h)")
-ax2.set_ylabel("Biotina libre (uM)")
-ax2.set_title("Biotina intracelular disponible")
+ax2.set_ylabel("Concentracion (uM)")
+ax2.set_title("(b) Vista completa 0-24h: estado estacionario")
+ax2.legend(loc="best", fontsize=9)
 ax2.grid(alpha=0.3)
-anadir_margen_ylim(ax2, biotina_t * 1e6)
+anadir_margen_ylim(ax2, np.concatenate([S_t, P_t]) * 1e6)
 
-# --- Grafica (c): % Biotinilacion vs tiempo, con lineas de referencia ---
-ax3.plot(t_horas, pct_bio, color="tab:purple", linewidth=2, label="% biotinilacion")
-ax3.plot(marker_horas, pct_bio_marker, "o", color="tab:purple", markersize=6, markeredgecolor="black", markeredgewidth=0.5, zorder=5)
-ax3.axhline(50, color="tab:gray", linestyle="--", linewidth=1)
-ax3.axhline(80, color="tab:red", linestyle="--", linewidth=1)
-ax3.axhline(95, color="black", linestyle="--", linewidth=1)
-ax3.text(t_horas[-1], 50, " Target 50%", va="center", ha="right", fontsize=8, color="tab:gray")
-ax3.text(t_horas[-1], 80, " Target 80%", va="bottom", ha="right", fontsize=8, color="tab:red")
-ax3.text(t_horas[-1], 95, " Target 95%", va="bottom", ha="right", fontsize=8, color="black")
-ax3.set_xlabel("Tiempo (h)")
-ax3.set_ylabel("% Biotinilacion")
-ax3.set_title("Progreso de biotinilacion")
-ax3.legend(loc="lower right", fontsize=9)
+# --- Grafica (c): ZOOM primeros 5 min - biotina libre (minutos) ---
+ax3.plot(t_zoom_min, biotina_zoom_fino * 1e6, color="tab:blue", linewidth=2, label="Biotina libre")
+ax3.plot(marker_zoom_min, biotina_marker_zoom * 1e6, "o", color="tab:blue", markersize=5, markeredgecolor="black", markeredgewidth=0.5, zorder=5)
+ax3.set_xlabel("Tiempo (min)")
+ax3.set_ylabel("Biotina libre (uM)")
+ax3.set_title("(c) ZOOM primeros 5 min: biotina disponible")
+ax3.legend(loc="best", fontsize=9)
 ax3.grid(alpha=0.3)
-anadir_margen_ylim(ax3, np.concatenate([pct_bio, [0, 100]]))
+anadir_margen_ylim(ax3, biotina_zoom_fino * 1e6)
 
-# --- Grafica (d): ZOOM a las primeras 4 horas (sustrato y producto) ---
-ventana_zoom_h = 4.0
-mascara_zoom = t_horas <= ventana_zoom_h
-t_zoom = t_horas[mascara_zoom]
-S_zoom = S_t[mascara_zoom] * 1e6
-P_zoom = P_t[mascara_zoom] * 1e6
-
-ax4.plot(t_zoom, S_zoom, label="dCas9-AviTag (sin biotinilar)", color="tab:orange", linewidth=2)
-ax4.plot(t_zoom, P_zoom, label="dCas9-Biotin (biotinilado)", color="tab:green", linewidth=2)
-
-# Solo se muestran los marcadores que caen dentro de la ventana de zoom (1h, 2h, 4h)
-mascara_marker_zoom = marker_horas <= ventana_zoom_h
-ax4.plot(marker_horas[mascara_marker_zoom], S_marker[mascara_marker_zoom] * 1e6, "o", color="tab:orange", markersize=6, markeredgecolor="black", markeredgewidth=0.5, zorder=5)
-ax4.plot(marker_horas[mascara_marker_zoom], P_marker[mascara_marker_zoom] * 1e6, "o", color="tab:green", markersize=6, markeredgecolor="black", markeredgewidth=0.5, zorder=5)
-
-ax4.set_xlabel("Tiempo (h)")
-ax4.set_ylabel("Concentracion (uM)")
-ax4.set_title(f"ZOOM: primeras {ventana_zoom_h:.0f}h (fase activa de la reaccion)")
-ax4.legend(loc="best", fontsize=9)
+# --- Grafica (d): ZOOM primeros 5 min - % biotinilacion, con lineas de referencia ---
+ax4.plot(t_zoom_min, pct_zoom_fino, color="tab:purple", linewidth=2, label="% biotinilacion")
+ax4.plot(marker_zoom_min, pct_marker_zoom, "o", color="tab:purple", markersize=5, markeredgecolor="black", markeredgewidth=0.5, zorder=5)
+ax4.axhline(50, color="tab:gray", linestyle="--", linewidth=1)
+ax4.axhline(80, color="tab:red", linestyle="--", linewidth=1)
+ax4.axhline(95, color="black", linestyle="--", linewidth=1)
+ax4.text(ventana_zoom_seg / 60.0, 50, " Target 50%", va="center", ha="right", fontsize=8, color="tab:gray")
+ax4.text(ventana_zoom_seg / 60.0, 80, " Target 80%", va="bottom", ha="right", fontsize=8, color="tab:red")
+ax4.text(ventana_zoom_seg / 60.0, 95, " Target 95%", va="bottom", ha="right", fontsize=8, color="black")
+ax4.set_xlabel("Tiempo (min)")
+ax4.set_ylabel("% Biotinilacion")
+ax4.set_title("(d) ZOOM primeros 5 min: progreso de biotinilacion")
+ax4.legend(loc="lower right", fontsize=9)
 ax4.grid(alpha=0.3)
-anadir_margen_ylim(ax4, np.concatenate([S_zoom, P_zoom]))
+anadir_margen_ylim(ax4, np.concatenate([pct_zoom_fino, [0, 100]]))
 
 plt.tight_layout(rect=[0, 0, 1, 0.96])
 plt.savefig("ModuloB_biotinilacion.png", dpi=150)
@@ -447,4 +482,4 @@ print("=" * 60)
 #      funcional siguiente del sistema, segun el diseño del proyecto).
 #
 # Output de este modulo -> Modulo C: pct_bio_final
-# =======================================================================# =======================================================================
+# =======================================================================
