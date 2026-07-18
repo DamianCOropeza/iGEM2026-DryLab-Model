@@ -14,8 +14,11 @@ a 16 grados C durante 24 horas.
 # INSTALACION DE DEPENDENCIAS (ejecutar en terminal una sola vez)
 # ============================================================
 # Si usas conda (recomendado para este proyecto):
-#   conda activate iGEM
+#   conda activate pythonProjectya
 #   conda install numpy scipy matplotlib
+#
+# Si usas pip:
+#   pip install numpy scipy matplotlib
 #
 # Verificar instalacion:
 #   python -c "import numpy, scipy, matplotlib; print('OK')"
@@ -104,14 +107,18 @@ Q10 = 2.0              # [adim] | Factor Q10 estandar para enzimas (rango tipico
                        #           Fuente: Atkinson, D. E. (1977). Cellular energy
                        #           metabolism and its regulation. Academic Press.
 
-# --- Condiciones iniciales del Modulo A (valores de ejemplo) ---
-# En el modelo integrado, estos valores vienen del output del Modulo A a t=20h.
-# Para esta version standalone, usar valores representativos:
-BirA_0 = 1.0e-6         # [M] | [BirA] inicial, tomada del output del Modulo A a t=20h.
-                       #        BirA es catalitica: su concentracion NO cambia durante
-                       #        la reaccion de biotinilacion. # ← Modulo A
-S_0 = 8.0e-6            # [M] | [dCas9-AviTag] inicial (fraccion de dCas9 total aun sin
-                       #        biotinilar), tomada del output del Modulo A a t=20h. # ← Modulo A
+# --- Condiciones iniciales del Modulo A (valores reales del Modulo A) ---
+# Estos valores vienen del output del sistema de 5 ODEs del Modulo A a t=20h
+# (integrado con Radau, f_rt=0.20, phi(16C)=0.60).
+BirA_0 = 3.592e-9  # [M] | ← Modulo A: P_BirA(20h) del sistema de 5 ODEs a 16C.
+                   #        Valor obtenido con Radau, f_rt=0.20, phi(16C)=0.60.
+                   #        NOTA: 280x menor que el valor provisional (1 uM).
+                   #        Esto coloca el sistema en regimen lineal ([BirA] << Km_S),
+                   #        lo que puede reducir significativamente el % de biotinilacion.
+
+S_0 = 4.489e-9     # [M] | ← Modulo A: P_dCas9(20h) total del sistema de 5 ODEs a 16C.
+                   #        NOTA: [S_0] << Km_S (2 uM), regimen de primer orden.
+                   #        La velocidad de reaccion ya no esta cerca de Vmax.
 
 # --- Tiempo de simulacion ---
 t_start = 0            # s
@@ -314,12 +321,41 @@ def anadir_margen_ylim(ax, datos, margen_frac=0.05):
     ax.set_ylim(y_min - margen, y_max + margen)
 
 
-# --- Grilla fina y marcadores para las graficas de ZOOM (primeros 5 minutos) ---
+# --- Calculo dinamico de la ventana de zoom, basado en t_95 ---
+# Se busca el tiempo t_95 (donde % biotinilacion alcanza 95%) usando la
+# solucion de la simulacion completa (t_horas, pct_bio). La ventana de
+# zoom por defecto es 35 minutos (suficiente para ver el 95% de la
+# reaccion con los parametros actuales), pero si t_95 x 1.3 resulta MENOR
+# a 35 min, se usa ese valor mas ajustado para tener mejor resolucion
+# visual sobre la fase activa real de la reaccion.
+ventana_zoom_min_default = 35.0   # [min] valor por defecto pedido
+t_95_h = tiempo_para_alcanzar_pct(95.0, t_horas, pct_bio)
+
+if t_95_h is not None:
+    t_95_min = t_95_h * 60.0
+    t_95_seg = t_95_h * 3600.0
+    ventana_candidata_min = t_95_min * 1.3
+    if ventana_candidata_min < ventana_zoom_min_default:
+        ventana_zoom_min = ventana_candidata_min
+    else:
+        ventana_zoom_min = ventana_zoom_min_default
+else:
+    # El 95% no se alcanzo dentro de la simulacion: se usa el default
+    t_95_min = None
+    t_95_seg = None
+    ventana_zoom_min = ventana_zoom_min_default
+
+ventana_zoom_seg = ventana_zoom_min * 60.0
+
+print(f"Ventana de zoom calculada dinamicamente: {ventana_zoom_min:.2f} min "
+      f"(t_95 = {t_95_min:.2f} min)" if t_95_min is not None else
+      f"Ventana de zoom: {ventana_zoom_min:.2f} min (95% no alcanzado en la simulacion, se usa el default)")
+
+# --- Grilla fina y marcadores para las graficas de ZOOM ---
 # Se genera una malla de tiempo de alta resolucion dentro de la ventana de
 # zoom usando la solucion densa (sol.sol), en vez de reusar la malla gruesa
-# de 2000 puntos sobre 24h (que solo tendria ~7 puntos en 5 minutos).
-ventana_zoom_seg = 300.0   # 5 minutos = 300 s
-t_zoom_seg = np.linspace(0.0, ventana_zoom_seg, 300)
+# de 2000 puntos sobre 24h (que tendria muy pocos puntos en esta ventana).
+t_zoom_seg = np.linspace(0.0, ventana_zoom_seg, 400)
 t_zoom_min = t_zoom_seg / 60.0
 estado_zoom = sol.sol(t_zoom_seg)
 S_zoom_fino = np.maximum(estado_zoom[0], 0.0)
@@ -327,8 +363,14 @@ P_zoom_fino = np.maximum(estado_zoom[1], 0.0)
 biotina_zoom_fino = np.maximum(estado_zoom[2], 0.0)
 pct_zoom_fino = (P_zoom_fino / S_0) * 100.0
 
-# Marcadores de punto cada 30 segundos, desde t=0 hasta t=300s (5 min)
-marker_zoom_seg = np.arange(0.0, ventana_zoom_seg + 1.0, 30.0)   # 0,30,60,...,300 s
+# Velocidad de reaccion v(t) en la ventana de zoom (M/s), usando la misma
+# formula de Michaelis-Menten de dos sustratos del sistema de ODEs.
+# Se muestra en nM/s para que los numeros sean legibles en la grafica.
+v_zoom_M_s = kcat_adj * BirA_0 * (S_zoom_fino / (Km_S + S_zoom_fino)) * (biotina_zoom_fino / (Km_bio + biotina_zoom_fino))
+v_zoom_nM_s = v_zoom_M_s * 1e9
+
+# Marcadores de punto cada 30 segundos, desde t=0 hasta el final de la ventana de zoom
+marker_zoom_seg = np.arange(0.0, ventana_zoom_seg + 1.0, 30.0)
 marker_zoom_min = marker_zoom_seg / 60.0
 estado_marker_zoom = sol.sol(marker_zoom_seg)
 S_marker_zoom = np.maximum(estado_marker_zoom[0], 0.0)
@@ -340,24 +382,27 @@ pct_marker_zoom = (P_marker_zoom / S_0) * 100.0
 # =======================================================================
 # 7. VISUALIZACION
 # =======================================================================
-# Nueva disposicion 2x2:
-#   (a) ZOOM primeros 5 minutos: sustrato y producto (fase activa de la reaccion)
-#   (b) Vista completa 0-24h: sustrato y producto (muestra el estado estacionario)
-#   (c) ZOOM primeros 5 minutos: biotina libre
-#   (d) ZOOM primeros 5 minutos: % biotinilacion, con lineas de referencia
+# Disposicion 2x2:
+#   (a) ZOOM dinamico (hasta ~t_95 x 1.3, tope 35 min): sustrato y producto
+#   (b) Vista completa 0-24h: sustrato y producto, con anotacion de tiempo
+#       de reaccion completa
+#   (c) ZOOM dinamico: velocidad de reaccion v(t) (confirma cinetica de
+#       primer orden via decaimiento exponencial, escala log en Y)
+#   (d) ZOOM dinamico: % biotinilacion, con lineas de referencia horizontales
+#       Y verticales marcando los tiempos exactos de 50%, 80%, 95%
 
 fig, axes = plt.subplots(2, 2, figsize=(13, 10))
 fig.suptitle("Modulo B - Cinetica de Biotinilacion por BirA (16 C, 24 h)", fontsize=14, fontweight="bold")
 ax1, ax2, ax3, ax4 = axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1]
 
-# --- Grafica (a): ZOOM primeros 5 min - sustrato y producto (minutos) ---
+# --- Grafica (a): ZOOM dinamico - sustrato y producto (minutos) ---
 ax1.plot(t_zoom_min, S_zoom_fino * 1e6, label="dCas9-AviTag (sin biotinilar)", color="tab:orange", linewidth=2)
 ax1.plot(t_zoom_min, P_zoom_fino * 1e6, label="dCas9-Biotin (biotinilado)", color="tab:green", linewidth=2)
 ax1.plot(marker_zoom_min, S_marker_zoom * 1e6, "o", color="tab:orange", markersize=5, markeredgecolor="black", markeredgewidth=0.5, zorder=5)
 ax1.plot(marker_zoom_min, P_marker_zoom * 1e6, "o", color="tab:green", markersize=5, markeredgecolor="black", markeredgewidth=0.5, zorder=5)
 ax1.set_xlabel("Tiempo (min)")
 ax1.set_ylabel("Concentracion (uM)")
-ax1.set_title("(a) ZOOM primeros 5 min: fase activa de la reaccion")
+ax1.set_title(f"(a) ZOOM primeros {ventana_zoom_min:.1f} min: fase activa de la reaccion")
 ax1.legend(loc="best", fontsize=9)
 ax1.grid(alpha=0.3)
 anadir_margen_ylim(ax1, np.concatenate([S_zoom_fino, P_zoom_fino]) * 1e6)
@@ -374,29 +419,57 @@ ax2.legend(loc="best", fontsize=9)
 ax2.grid(alpha=0.3)
 anadir_margen_ylim(ax2, np.concatenate([S_t, P_t]) * 1e6)
 
-# --- Grafica (c): ZOOM primeros 5 min - biotina libre (minutos) ---
-ax3.plot(t_zoom_min, biotina_zoom_fino * 1e6, color="tab:blue", linewidth=2, label="Biotina libre")
-ax3.plot(marker_zoom_min, biotina_marker_zoom * 1e6, "o", color="tab:blue", markersize=5, markeredgecolor="black", markeredgewidth=0.5, zorder=5)
-ax3.set_xlabel("Tiempo (min)")
-ax3.set_ylabel("Biotina libre (uM)")
-ax3.set_title("(c) ZOOM primeros 5 min: biotina disponible")
-ax3.legend(loc="best", fontsize=9)
-ax3.grid(alpha=0.3)
-anadir_margen_ylim(ax3, biotina_zoom_fino * 1e6)
+# Anotacion de tiempo de reaccion "completa" (se usa t_95 como referencia
+# practica de cuando la reaccion ya convirtio la gran mayoria del sustrato)
+if t_95_min is not None:
+    t_anotacion_h = t_95_seg / 3600.0
+    P_en_t95_uM = np.interp(t_95_seg, t_seg, P_t) * 1e6
+    ax2.annotate(
+        f"Reaccion completa en ~{t_95_min:.1f} min",
+        xy=(t_anotacion_h, P_en_t95_uM),
+        xytext=(t_anotacion_h + 4.0, P_en_t95_uM * 0.65 if P_en_t95_uM > 0 else 0.1),
+        fontsize=9, color="tab:green",
+        arrowprops=dict(arrowstyle="->", color="tab:green", lw=1.2),
+    )
 
-# --- Grafica (d): ZOOM primeros 5 min - % biotinilacion, con lineas de referencia ---
+# --- Grafica (c): ZOOM dinamico - velocidad de reaccion v(t) ---
+# Se grafica en escala logaritmica en Y: si la cinetica es de primer orden
+# (v proporcional a S, que decae exponencialmente), v(t) se ve como una
+# LINEA RECTA en escala semi-log. Esto es la confirmacion visual pedida.
+ax3.plot(t_zoom_min, v_zoom_nM_s, color="tab:red", linewidth=2, label="v(t)")
+ax3.set_yscale("log")
+ax3.set_xlabel("Tiempo (min)")
+ax3.set_ylabel("Velocidad v (nM/s, escala log)")
+ax3.set_title(f"(c) ZOOM primeros {ventana_zoom_min:.1f} min: velocidad de reaccion")
+ax3.legend(loc="best", fontsize=9)
+ax3.grid(alpha=0.3, which="both")
+
+# --- Grafica (d): ZOOM dinamico - % biotinilacion, con lineas de referencia ---
 ax4.plot(t_zoom_min, pct_zoom_fino, color="tab:purple", linewidth=2, label="% biotinilacion")
 ax4.plot(marker_zoom_min, pct_marker_zoom, "o", color="tab:purple", markersize=5, markeredgecolor="black", markeredgewidth=0.5, zorder=5)
 ax4.axhline(50, color="tab:gray", linestyle="--", linewidth=1)
 ax4.axhline(80, color="tab:red", linestyle="--", linewidth=1)
 ax4.axhline(95, color="black", linestyle="--", linewidth=1)
-ax4.text(ventana_zoom_seg / 60.0, 50, " Target 50%", va="center", ha="right", fontsize=8, color="tab:gray")
-ax4.text(ventana_zoom_seg / 60.0, 80, " Target 80%", va="bottom", ha="right", fontsize=8, color="tab:red")
-ax4.text(ventana_zoom_seg / 60.0, 95, " Target 95%", va="bottom", ha="right", fontsize=8, color="black")
+ax4.text(ventana_zoom_min, 50, " Target 50%", va="center", ha="right", fontsize=8, color="tab:gray")
+ax4.text(ventana_zoom_min, 80, " Target 80%", va="bottom", ha="right", fontsize=8, color="tab:red")
+ax4.text(ventana_zoom_min, 95, " Target 95%", va="bottom", ha="right", fontsize=8, color="black")
+
+# Lineas verticales en los tiempos exactos donde se alcanzan 50%, 80%, 95%
+colores_objetivo = {50: "tab:gray", 80: "tab:red", 95: "black"}
+for objetivo in [50, 80, 95]:
+    t_obj_h = tiempo_para_alcanzar_pct(objetivo, t_horas, pct_bio)
+    if t_obj_h is not None:
+        t_obj_min = t_obj_h * 60.0
+        if t_obj_min <= ventana_zoom_min:
+            color_obj = colores_objetivo[objetivo]
+            ax4.axvline(t_obj_min, color=color_obj, linestyle=":", linewidth=1.2, alpha=0.8)
+            ax4.text(t_obj_min, 5, f" t={t_obj_min:.2f} min", rotation=90, va="bottom", ha="right",
+                     fontsize=7.5, color=color_obj)
+
 ax4.set_xlabel("Tiempo (min)")
 ax4.set_ylabel("% Biotinilacion")
-ax4.set_title("(d) ZOOM primeros 5 min: progreso de biotinilacion")
-ax4.legend(loc="lower right", fontsize=9)
+ax4.set_title(f"(d) ZOOM primeros {ventana_zoom_min:.1f} min: progreso de biotinilacion")
+ax4.legend(loc="center right", fontsize=9)
 ax4.grid(alpha=0.3)
 anadir_margen_ylim(ax4, np.concatenate([pct_zoom_fino, [0, 100]]))
 
@@ -429,6 +502,34 @@ for objetivo in [50, 80, 95]:
         print(f"(2) Tiempo para alcanzar {objetivo}%: NO alcanzado en {t_end/3600:.0f}h de simulacion")
     else:
         print(f"(2) Tiempo para alcanzar {objetivo}%: {t_cruce:.3f} h ({t_cruce*3600:.1f} s)")
+
+# --- (2b) Mismos tiempos, expresados en minutos y segundos ---
+print("\n(2b) Tiempos de biotinilacion en minutos y segundos:")
+for objetivo in [50, 80, 95]:
+    t_cruce_h = tiempo_para_alcanzar_pct(objetivo, t_horas, pct_bio)
+    if t_cruce_h is None:
+        print(f"     {objetivo}%: NO alcanzado en {t_end/3600:.0f}h de simulacion")
+    else:
+        t_cruce_min = t_cruce_h * 60.0
+        t_cruce_seg = t_cruce_h * 3600.0
+        print(f"     {objetivo}%: {t_cruce_min:.2f} min ({t_cruce_seg:.1f} s)")
+
+# --- (2c) Confirmacion de regimen cinetico (primer orden vs. saturacion) ---
+razon_S0_KmS = S_0 / Km_S
+print(f"\n(2c) Razon [S_0]/Km_S = {razon_S0_KmS:.4f}", end="  ")
+if razon_S0_KmS < 0.1:
+    print("-> REGIMEN DE PRIMER ORDEN confirmado ([S_0] << Km_S, v es aprox. proporcional a [S]).")
+else:
+    print("-> el sistema NO esta claramente en regimen de primer orden ([S_0] no es << Km_S).")
+
+# --- (2d) Tiempo de vida media del sustrato (aproximacion de primer orden) ---
+# t_1/2 = ln(2) * Km_S / (kcat_adj * BirA_0)
+# Esta formula asume pseudo-primer-orden: v ~ (kcat_adj*BirA_0/Km_S)*S, valido
+# cuando [S] << Km_S (confirmado arriba) y la biotina no es limitante.
+t_half_seg = np.log(2) * Km_S / (kcat_adj * BirA_0)
+print(f"(2d) Vida media del sustrato (aprox. primer orden): "
+      f"t_1/2 = ln(2) x Km_S / (kcat_adj x BirA_0) = {t_half_seg:.2f} s "
+      f"({t_half_seg/60:.2f} min)")
 
 # --- (3) Concentracion final de dCas9-Biotin disponible para el Modulo C ---
 P_final_uM = P_t[-1] * 1e6
