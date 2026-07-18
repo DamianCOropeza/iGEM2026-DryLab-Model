@@ -1,2 +1,2 @@
-# iGEM2025-DryLab-Model
+# iGEM2026-DryLab-Model
 Proyecto iGEM Puebla
