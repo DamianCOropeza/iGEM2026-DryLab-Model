@@ -17,8 +17,6 @@ a 16 grados C durante 24 horas.
 #   conda activate pythonProjectya
 #   conda install numpy scipy matplotlib
 #
-# Si usas pip:
-#   pip install numpy scipy matplotlib
 #
 # Verificar instalacion:
 #   python -c "import numpy, scipy, matplotlib; print('OK')"
@@ -107,18 +105,41 @@ Q10 = 2.0              # [adim] | Factor Q10 estandar para enzimas (rango tipico
                        #           Fuente: Atkinson, D. E. (1977). Cellular energy
                        #           metabolism and its regulation. Academic Press.
 
-# --- Condiciones iniciales del Modulo A (valores reales del Modulo A) ---
-# Estos valores vienen del output del sistema de 5 ODEs del Modulo A a t=20h
-# (integrado con Radau, f_rt=0.20, phi(16C)=0.60).
-BirA_0 = 3.592e-9  # [M] | ← Modulo A: P_BirA(20h) del sistema de 5 ODEs a 16C.
-                   #        Valor obtenido con Radau, f_rt=0.20, phi(16C)=0.60.
-                   #        NOTA: 280x menor que el valor provisional (1 uM).
-                   #        Esto coloca el sistema en regimen lineal ([BirA] << Km_S),
-                   #        lo que puede reducir significativamente el % de biotinilacion.
+# --- Condiciones iniciales del Modulo A v2.0 (modelo unificado Damian+Valeria) ---
+# ACTUALIZACION: estos valores vienen del Modulo A v2.0 (modulo_A_v2_modelo_equipo.py),
+# el modelo unificado de equipo que fusiono los modelos de Damian y Valeria tras la
+# auditoria bibliografica formal. Reemplazan a los valores de la version anterior de A
+# (que usaba k_R_ref=5.0 nM/h con una cita que resulto incorrecta -- ver
+# Comparacion_ModuloA_Damian_vs_Valeria.pdf).
+#
+# El Modulo A v2.0 corrio 500 simulaciones Monte Carlo propagando la incertidumbre real
+# de sus parametros (k_R_ref, f_rt, phi_37, etc.), asi que ademas del valor NOMINAL
+# (corrida deterministica) se toman tambien los percentiles 5 y 95 del Monte Carlo, para
+# poder correr este Modulo B en 3 escenarios (pesimista / nominal / optimista) en la
+# Seccion 9 mas abajo, en vez de confiar en un solo numero puntual.
+BirA_0 = 13.112e-9  # [M] | ← Modulo A v2.0: P_BirA(20h), corrida NOMINAL (deterministica).
+                    #        IC90% Monte Carlo (N=500): [3.73 - 31.72] nM.
+                    #        NOTA: en el 98.8% de las combinaciones de parametros
+                    #        muestreadas en A v2.0, P_BirA(20h) < P_dCas9(20h) -- ver
+                    #        advertencia de estequiometria en la Seccion 9.
 
-S_0 = 4.489e-9     # [M] | ← Modulo A: P_dCas9(20h) total del sistema de 5 ODEs a 16C.
-                   #        NOTA: [S_0] << Km_S (2 uM), regimen de primer orden.
-                   #        La velocidad de reaccion ya no esta cerca de Vmax.
+S_0 = 20.145e-9     # [M] | ← Modulo A v2.0: P_dCas9(20h) TOTAL, corrida NOMINAL.
+                    #        IC90% Monte Carlo (N=500): [5.78 - 50.64] nM.
+                    #        (Se usa el total, no el x phi_16, porque la biotinilacion
+                    #        actua sobre la proteina ya sintetizada independientemente
+                    #        de si termino correctamente plegada; phi_16 se aplica
+                    #        aguas abajo, en el Modulo C).
+
+# --- Valores de escenario P5 y P95 del Monte Carlo de Modulo A v2.0 ---
+# Se usan los percentiles PAREADOS (mismo escenario de incertidumbre para BirA_0 y S_0
+# a la vez), no muestreados de forma independiente, porque ambos salen del MISMO
+# conjunto de parametros inciertos de A (k_R, f_rt, Q10, etc.) -- tratarlos como
+# independientes ignoraria que estan correlacionados.
+BirA_0_pesimista = 3.73e-9    # [M] | ← Modulo A v2.0, percentil 5 del Monte Carlo
+S_0_pesimista = 5.78e-9       # [M] | ← Modulo A v2.0, percentil 5 del Monte Carlo
+
+BirA_0_optimista = 31.72e-9   # [M] | ← Modulo A v2.0, percentil 95 del Monte Carlo
+S_0_optimista = 50.64e-9      # [M] | ← Modulo A v2.0, percentil 95 del Monte Carlo
 
 # --- Tiempo de simulacion ---
 t_start = 0            # s
@@ -480,7 +501,117 @@ plt.show()
 
 
 # =======================================================================
-# 8. OUTPUT PARA INTEGRACION
+# 9. ANALISIS DE ESCENARIOS -- INCERTIDUMBRE HEREDADA DEL MODULO A v2.0
+# =======================================================================
+# El Modulo A v2.0 no entrega un solo numero para P_dCas9(20h) y P_BirA(20h):
+# entrega una corrida NOMINAL (ya usada arriba) y un intervalo de confianza
+# de 90% (Monte Carlo, N=500). En vez de reportar un solo resultado de
+# biotinilacion como si fuera el unico posible, esta seccion corre el mismo
+# modelo cinetico de Michaelis-Menten para los 3 escenarios: PESIMISTA (P5),
+# NOMINAL y OPTIMISTA (P95), y compara cuanto cambia el resultado final.
+#
+# IMPORTANTE: esto NO es una corrida Monte Carlo nueva de este modulo -- es
+# una propagacion de los 3 escenarios ya calculados en el Modulo A v2.0,
+# preservando el pareo entre BirA_0 y S_0 (ambos vienen del mismo escenario
+# de parametros inciertos de A, no se muestrean por separado).
+
+def correr_biotinilacion(BirA_0_i, S_0_i):
+    """
+    Resuelve el sistema de ODEs de biotinilacion para un juego de
+    condiciones iniciales (BirA_0_i, S_0_i) dado, manteniendo fijos los
+    parametros cineticos (kcat_adj, Km_S, Km_bio, bio_intra) del Modulo B.
+    Retorna un diccionario con las series de tiempo y metricas clave.
+    """
+    parametros_i = {
+        "BirA_0": BirA_0_i,
+        "kcat_adj": kcat_adj,
+        "Km_S": Km_S,
+        "Km_bio": Km_bio,
+    }
+    y0_i = [S_0_i, 0.0, bio_intra]
+    sol_i = solve_ivp(
+        fun=modelo_biotinilacion, t_span=(t_start, t_end), y0=y0_i,
+        method="RK45", t_eval=t_eval, dense_output=True, args=(parametros_i,),
+        rtol=1e-8, atol=1e-12,
+    )
+    S_i = np.maximum(sol_i.y[0], 0.0)
+    P_i = np.maximum(sol_i.y[1], 0.0)
+    biotina_i = np.maximum(sol_i.y[2], 0.0)
+    pct_bio_i = (P_i / S_0_i) * 100.0 if S_0_i > 0 else np.zeros_like(P_i)
+
+    t_h = sol_i.t / 3600.0
+    t_95_i = tiempo_para_alcanzar_pct(95.0, t_h, pct_bio_i)
+
+    return {
+        "sol": sol_i, "t_horas": t_h, "S": S_i, "P": P_i, "biotina": biotina_i,
+        "pct_bio": pct_bio_i, "pct_bio_final": pct_bio_i[-1],
+        "P_final_M": P_i[-1], "S_0": S_0_i, "BirA_0": BirA_0_i,
+        "t_95_h": t_95_i,
+    }
+
+
+print("\n" + "=" * 60)
+print("ANALISIS DE ESCENARIOS (incertidumbre heredada de Modulo A v2.0)")
+print("=" * 60)
+
+escenarios = {
+    "Pesimista (P5)": correr_biotinilacion(BirA_0_pesimista, S_0_pesimista),
+    "Nominal": correr_biotinilacion(BirA_0, S_0),
+    "Optimista (P95)": correr_biotinilacion(BirA_0_optimista, S_0_optimista),
+}
+
+print(f"{'Escenario':<18s}{'BirA_0 (nM)':>13s}{'S_0 (nM)':>11s}{'% biotin. 24h':>15s}{'[Producto] final (nM)':>24s}{'t95 (min)':>12s}")
+print("-" * 96)
+for nombre, r in escenarios.items():
+    t95_txt = f"{r['t_95_h']*60:.2f}" if r["t_95_h"] is not None else "no alcanzado"
+    print(f"{nombre:<18s}{r['BirA_0']*1e9:>13.2f}{r['S_0']*1e9:>11.2f}{r['pct_bio_final']:>14.1f}%{r['P_final_M']*1e9:>23.3f}{t95_txt:>12s}")
+
+print("\nInterpretacion: el % de biotinilacion se mantiene practicamente completo (~100%) en")
+print("los 3 escenarios, porque incluso en el escenario optimista S_0 (~50.6 nM) sigue muy por")
+print("debajo de bio_intra (5000 nM) -- la biotina nunca se vuelve limitante en ningun escenario")
+print("plausible de A v2.0. Lo que SI cambia mucho entre escenarios es la CANTIDAD ABSOLUTA de")
+print("producto final disponible para el Modulo D, que escala practicamente 1:1 con S_0.")
+
+# --- Figura nueva: comparacion de escenarios (NO reemplaza la figura principal) ---
+fig_esc, axes_esc = plt.subplots(1, 2, figsize=(13, 5.5))
+fig_esc.suptitle("Modulo B - Escenarios de incertidumbre heredados del Modulo A v2.0", fontsize=13, fontweight="bold")
+
+colores_escenario = {"Pesimista (P5)": "tab:red", "Nominal": "tab:blue", "Optimista (P95)": "tab:green"}
+
+# Panel izquierdo: % biotinilacion vs tiempo (primeros 60 min), 3 escenarios superpuestos
+ax_esc1 = axes_esc[0]
+ventana_comparacion_min = 60.0
+for nombre, r in escenarios.items():
+    mask = r["t_horas"] * 60.0 <= ventana_comparacion_min
+    ax_esc1.plot(r["t_horas"][mask] * 60.0, r["pct_bio"][mask], color=colores_escenario[nombre],
+                 linewidth=2, label=nombre)
+ax_esc1.set_xlabel("Tiempo (min)")
+ax_esc1.set_ylabel("% Biotinilacion")
+ax_esc1.set_title("% biotinilacion: los 3 escenarios convergen a ~100%")
+ax_esc1.legend(fontsize=9)
+ax_esc1.grid(alpha=0.3)
+
+# Panel derecho: concentracion final de producto (barra), muestra la diferencia real
+ax_esc2 = axes_esc[1]
+nombres_barra = list(escenarios.keys())
+valores_barra = [escenarios[n]["P_final_M"] * 1e9 for n in nombres_barra]
+colores_barra = [colores_escenario[n] for n in nombres_barra]
+barras = ax_esc2.bar(nombres_barra, valores_barra, color=colores_barra, alpha=0.8, edgecolor="black")
+for barra, valor in zip(barras, valores_barra):
+    ax_esc2.text(barra.get_x() + barra.get_width() / 2, valor, f"{valor:.2f} nM",
+                 ha="center", va="bottom", fontsize=9)
+ax_esc2.set_ylabel("[dCas9-Biotin] final (nM)")
+ax_esc2.set_title("Cantidad ABSOLUTA de producto: aqui SI importa el escenario")
+ax_esc2.grid(alpha=0.3, axis="y")
+
+plt.tight_layout(rect=[0, 0, 1, 0.93])
+plt.savefig("ModuloB_escenarios_ModuloA_v2.png", dpi=150)
+print("\nFigura guardada como: ModuloB_escenarios_ModuloA_v2.png")
+plt.show()
+
+
+# =======================================================================
+# 10. OUTPUT PARA INTEGRACION
 # =======================================================================
 # Resumen final de resultados, pensado para copiarse/leerse facilmente
 # al conectar este modulo con el resto del pipeline (Modulo A -> B -> C).
@@ -559,28 +690,37 @@ print("=" * 60)
 
 
 # =======================================================================
-# 9. INTEGRACION CON MODULO A
+# 11. INTEGRACION CON MODULO A v2.0
 # =======================================================================
 #
-# En el modelo integrado completo (Modulo A + Modulo B + Modulo C), este
-# script NO debe usar los valores de ejemplo BirA_0 y S_0 definidos
-# arriba. En su lugar:
+# ACTUALIZACION: BirA_0 y S_0 (Seccion 2) ya NO son valores de ejemplo --
+# son el output real del Modulo A v2.0 (modelo unificado de equipo,
+# Damian + Valeria, tras la auditoria bibliografica que elimino 3 citas
+# incorrectas/no verificables). Concretamente:
 #
-#   1. El Modulo A resuelve su propio sistema de ODEs (expresion genica
-#      de BirA y dCas9-AviTag) con solve_ivp, obteniendo las series de
-#      tiempo P_BirA(t) y P_dCas9(t).
-#   2. Se extraen los valores en t = 20 h:
-#         BirA_0 = P_BirA_moduloA(t=20h)
-#         S_0    = P_dCas9_moduloA(t=20h)
-#   3. Estos valores se pasan como condiciones iniciales al presente
-#      Modulo B (reemplazando las lineas BirA_0 = ... y S_0 = ... de la
-#      seccion 2 de este script).
-#   4. El Modulo B corre su propia integracion (0 a 24 h de induccion a
-#      16 C) y produce pct_bio_final, el porcentaje final de dCas9
-#      biotinilado.
-#   5. pct_bio_final se pasa como input al Modulo C, que modelara la
-#      union del sistema dCas9-Biotin-estreptavidina (o el paso
-#      funcional siguiente del sistema, segun el diseño del proyecto).
+#   1. El Modulo A v2.0 resuelve su sistema de 5 ODEs con induccion por
+#      Hill, y ademas corre N=500 simulaciones Monte Carlo propagando la
+#      incertidumbre real de sus parametros (especialmente k_R_ref y f_rt,
+#      los dos marcados como WETLAB_PEND de mayor impacto).
+#   2. Del Modulo A v2.0 se toman TRES escenarios, no un solo numero:
+#         Nominal:    BirA_0 = P_BirA(20h) determinista = 13.11 nM
+#         Pesimista:  percentil 5 del Monte Carlo = 3.73 nM
+#         Optimista:  percentil 95 del Monte Carlo = 31.72 nM
+#      (mismo criterio para S_0 = P_dCas9(20h) total, ver Seccion 2).
+#   3. Este Modulo B corre su propia integracion (0-24h a 16C) para CADA
+#      escenario (Seccion 9), en vez de solo para el nominal, y expone
+#      pct_bio_final y [dCas9-Biotin]_final para los tres.
+#   4. HALLAZGO CLAVE (Seccion 9): el % de biotinilacion es ~100% en los
+#      tres escenarios (la biotina nunca es limitante en el rango de A
+#      v2.0), pero la CANTIDAD ABSOLUTA de producto final SI varia
+#      fuertemente entre escenarios (proporcional a S_0). Por eso el
+#      Modulo D debe recibir, idealmente, los tres escenarios (o al menos
+#      el rango pesimista-optimista) en vez de un unico C_proteina.
+#   5. Cuando WetLab mida k_R_ref y f_rt (las dos mediciones criticas
+#      identificadas en A v2.0), la incertidumbre de BirA_0 y S_0 se
+#      reducira, y este analisis de 3 escenarios podra colapsarse de
+#      nuevo a un unico valor confiable.
 #
-# Output de este modulo -> Modulo C: pct_bio_final
+# Output de este modulo -> Modulo D: pct_bio_final y [dCas9-Biotin]_final
+# de los 3 escenarios (Pesimista / Nominal / Optimista).
 # =======================================================================
