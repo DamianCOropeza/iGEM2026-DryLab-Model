@@ -2,906 +2,755 @@
 # -*- coding: utf-8 -*-
 """
 =======================================================================
-MODULO A - PRODUCCION EN E. coli (SISTEMA DE 5 ODEs, T7 RNAP, 16C / 20h)
+MODULO A v2.0 - MODELO UNIFICADO DE EQUIPO (Damian + Valeria)
 =======================================================================
+Produccion de dCas9-AviTag y BirA en E. coli BL21(DE3) - Sistema de 5 ODEs
 Proyecto iGEM 2025 - Deteccion de mutaciones oncogenicas en ctDNA
-Modelado matematico de biologia sintetica (Dry Lab)
 
-Este es el MODULO RAIZ del modelo completo. Sus outputs alimentan a
-todos los demas modulos:
-    P_dCas9(20h) x phi(16C) -> Modulo C (proteina disponible para purificacion)
-    P_BirA(20h)              -> Modulo B (enzima disponible para biotinilacion)
-    P_dCas9(20h) : P_BirA(20h) -> resultado de diseno QbD (estequiometria)
+Este script REEMPLAZA a modulo_A_expresion_genica.py (v1.0). Es el
+resultado de fusionar los modelos independientes de Damian y Valeria
+tras una auditoria bibliografica formal (ver
+Comparacion_ModuloA_Damian_vs_Valeria.pdf). Tres citas de v1.0 fueron
+eliminadas por incorrectas o no verificables (ver Seccion de parametros
+mas abajo, buscar "CAMBIOS RESPECTO A v1.0" en cada parametro afectado).
 
 # ============================================================
 # INSTALACION DE DEPENDENCIAS (ejecutar en terminal una sola vez)
 # ============================================================
-# conda activate pythonProjectya
+# conda activate iGEM
 # conda install numpy scipy matplotlib
 #
-# pip (alternativa):
-# pip install numpy scipy matplotlib
-#
-# Verificar:
-# python -c "import numpy, scipy, matplotlib; print('OK')"
-#
-# Ejecutar:
-# python modulo_A_expresion_genica.py
 # ============================================================
 """
 
 # =======================================================================
 # IMPORTS
 # =======================================================================
-import numpy as np                              # arreglos numericos y operaciones vectoriales
-from scipy.integrate import solve_ivp            # resolvedor de sistemas de ODEs (metodo Radau para sistemas stiff)
-import matplotlib.pyplot as plt                  # generacion de graficas
-import matplotlib.gridspec as gridspec           # layout de subplots mas flexible que plt.subplots
+import numpy as np
+from scipy.integrate import solve_ivp
+import matplotlib.pyplot as plt
 
-# =======================================================================
-# JUSTIFICACION DEL MODELO
-# =======================================================================
-# ¿POR QUE ODEs AQUI Y NO EN LOS OTROS MODULOS?
-# -----------------------------------------------------------------------
-# Los Modulos D y E pudieron resolverse con ecuaciones algebraicas de
-# equilibrio (isotermas de Langmuir/Hill) porque las reacciones de union
-# involucradas (biotina-streptavidina, dCas9-sgRNA-target) alcanzan su
-# estado estacionario mucho mas rapido que la escala de tiempo del
-# experimento, y solo hay 1-2 especies relevantes.
-#
-# El Modulo A es distinto: aqui CINCO especies moleculares cambian
-# SIMULTANEAMENTE y a velocidades comparables durante las 20h de
-# induccion: la T7 RNAP se sintetiza y se degrada, dos tipos de ARNm se
-# transcriben y degradan, y dos proteinas se traducen y degradan, todo
-# mientras la celula misma crece y diluye su contenido. Ninguna de estas
-# especies alcanza equilibrio instantaneo respecto a las demas, por lo
-# que el sistema NO puede reducirse a una formula algebraica: se
-# requiere resolver el sistema acoplado de ecuaciones diferenciales en
-# el tiempo.
-#
-# DISENO GENETICO DEL SISTEMA
-# -----------------------------------------------------------------------
-# La construccion tiene DOS promotores T7 en TANDEM y UN terminador
-# compartido:
-#
-#   [Promotor T7 #1] -> [6xHis-TrxA-dCas9-AviTag] -> [Promotor T7 #2] -> [BirA] -> [Terminador T7]
-#
-# La T7 RNAP que inicia en el Promotor #1 no siempre termina al llegar
-# al final del gen dCas9-AviTag: sin terminador intermedio, una fraccion
-# f_rt ("read-through") continua transcribiendo hasta el terminador
-# compartido, generando un transcrito LARGO (T_L) que contiene AMBAS
-# ORFs (dCas9-AviTag y BirA). La T7 RNAP que inicia en el Promotor #2
-# genera un transcrito CORTO (T_2) que solo contiene la ORF de BirA.
-#
-# Consecuencia: BirA se traduce desde DOS fuentes de ARNm (T_L, con
-# eficiencia parcial via RBS2, y T_2, con eficiencia completa via RBS2),
-# mientras que dCas9-AviTag SOLO se traduce desde T_L (via RBS1). Este
-# diseno amplifica deliberadamente la produccion de BirA respecto a
-# dCas9-AviTag, para asegurar suficiente enzima disponible para
-# biotinilacion completa (ver Modulo B).
-#
-# VARIABLES DE ESTADO
-# -----------------------------------------------------------------------
-#   R(t)       : T7 RNAP activa [nM]. Se acumula gradualmente tras la
-#                induccion con IPTG (sistema DE3: lacUV5 -> gen de T7 RNAP).
-#   T_L(t)     : transcrito largo [nM]. Iniciado en Promotor T7 #1;
-#                contiene dCas9-AviTag siempre, y BirA solo si hubo
-#                read-through.
-#   T_2(t)     : transcrito corto [nM]. Iniciado en Promotor T7 #2;
-#                contiene solo BirA.
-#   P_dCas9(t) : proteina dCas9-AviTag total [nM]. Traducida solo desde T_L.
-#   P_BirA(t)  : proteina BirA total [nM]. Traducida desde T_L (read-through,
-#                fraccion f_rt) y desde T_2 (promotor propio).
-#
-# SIGNIFICADO DE CADA TERMINO EN CADA ODE
-# -----------------------------------------------------------------------
-# Cada ecuacion tiene la forma general:
-#     d[X]/dt = SINTESIS - DEGRADACION - DILUCION
-#
-# La DILUCION por crecimiento celular (termino mu(T)*X) aplica a TODAS
-# las especies: a medida que la celula crece y se divide, su contenido
-# molecular se reparte entre las celulas hijas, lo cual equivale
-# matematicamente a una perdida de concentracion proporcional a la tasa
-# de crecimiento mu. A 16C esta tasa es baja (division cada ~5-6h) pero
-# NO despreciable en una induccion de 20h (~3-4 generaciones).
-#
-# La DEGRADACION (terminos delta_R, delta_m, delta_p) representa la
-# destruccion activa de cada especie por maquinaria celular (proteasas
-# para proteinas, RNasas para ARNm).
-#
-# La SINTESIS de cada especie depende de la especie "aguas arriba" en la
-# cascada de expresion genica: T7 RNAP se sintetiza a tasa constante tras
-# induccion (k_R); los transcritos se sintetizan proporcionalmente a la
-# cantidad de T7 RNAP disponible (k_tx1*R, k_tx2*R); las proteinas se
-# sintetizan proporcionalmente a la cantidad de su ARNm molde (k_tl1*T_L,
-# k_tl2*(f_rt*T_L + T_2)).
-#
-# ¿POR QUE f_rt ES EL PARAMETRO MAS IMPORTANTE?
-# -----------------------------------------------------------------------
-# f_rt controla directamente cuanta "ayuda extra" recibe BirA del
-# transcrito largo T_L (que existe en la misma cantidad que el ARNm de
-# dCas9-AviTag). Es el parametro de diseno genetico mas incierto
-# (depende de la eficiencia real de terminacion transcripcional del
-# sistema, que no tiene terminador intermedio) y el que mas control tiene
-# el equipo sobre la relacion estequiometrica final P_dCas9:P_BirA, que
-# es el resultado de diseno (QbD) mas relevante de todo este modulo: si
-# f_rt es demasiado bajo, BirA podria ser insuficiente para biotinilar
-# todo el dCas9-AviTag producido (cuello de botella para el Modulo B).
+np.random.seed(42)  # reproducibilidad de las corridas Monte Carlo
 
 
 # =======================================================================
-# SUPUESTOS DEL MODELO
+# SECCION 1 - CLASE Param
 # =======================================================================
-# 1. IPTG se anade a t=0 y la induccion es instantanea: no se modela un
-#    retraso (lag) en la senalizacion IPTG -> lacUV5 -> T7 RNAP.
-# 2. k_tx1 = k_tx2 = k_tx_ref: se asume que los dos promotores T7 en
-#    tandem tienen la misma fuerza (no hay medicion de fuerza relativa
-#    individual). Supuesto documentado, a refinar con WetLab.
-# 3. Los dos transcritos (T_L, T_2) comparten la misma tasa de
-#    degradacion delta_m (ambos son ARNm con estructura 5'/3' similar,
-#    sin datos que sugieran degradacion diferencial).
-# 4. dCas9-AviTag y BirA comparten la misma tasa de degradacion de
-#    proteina delta_p (ambas se asumen proteinas estables tipicas de
-#    E. coli, sin datos de vida media especifica para cada una).
-# 5. El factor de plegamiento phi(T) NO forma parte de las ODEs: se
-#    aplica como factor multiplicativo EXTERNO al output final de
-#    P_dCas9(20h), porque describe una propiedad de la POBLACION de
-#    proteina ya sintetizada (que fraccion plego correctamente) y no un
-#    proceso cinetico adicional de sintesis/degradacion en el tiempo.
-# 6. Sistema cerrado: no hay exportacion o secrecion de proteina fuera
-#    de la celula (dCas9-AviTag y BirA son intracelulares).
-# 7. Temperatura constante (16C) durante toda la induccion de 20h (no se
-#    modela el tiempo de enfriamiento del cultivo tras la induccion).
-# =======================================================================
+class Param:
+    """
+    Representa un parametro numerico del modelo con metadatos de
+    trazabilidad QbD (Quality by Design).
+
+    origin permitido: 'LIT' | 'WETLAB_PEND' | 'PLACEHOLDER' | 'DERIVED' | 'PROTOCOL'
+    """
+
+    def __init__(self, value, unit, origin, citation, rel_unc,
+                 sampling="triangular", wet_lab_note=None):
+        self.value = value
+        self.unit = unit
+        self.origin = origin
+        self.citation = citation
+        self.rel_unc = rel_unc
+        self.sampling = sampling
+        self.wet_lab_note = wet_lab_note
+
+    def sample(self):
+        """Muestrea un valor para Monte Carlo respetando el metodo de muestreo."""
+        if self.rel_unc <= 0:
+            return self.value
+        lo = self.value * (1 - self.rel_unc)
+        hi = self.value * (1 + self.rel_unc)
+        if self.sampling == "triangular":
+            return np.random.triangular(lo, self.value, hi)
+        elif self.sampling == "uniform":
+            return np.random.uniform(lo, hi)
+        else:
+            return self.value
+
+    def __repr__(self):
+        return f"Param({self.value} {self.unit}, origin={self.origin}, rel_unc={self.rel_unc:.0%})"
 
 
 # =======================================================================
-# FUNCION DE CORRECCION DE TEMPERATURA (Q10)
+# SECCION 2 - FUNCION Q10
 # =======================================================================
 def ajustar_Q10(k_ref, Q10, T_exp=16.0, T_ref=37.0):
-    """
-    Ajusta una constante cinetica medida a T_ref hacia una nueva
-    temperatura T_exp utilizando el factor Q10.
-
-        k_ajustado = k_ref * Q10 ^ ((T_exp - T_ref) / 10)
-
-    Parametros:
-        k_ref  : constante cinetica a la temperatura de referencia
-        Q10    : factor de sensibilidad termica del proceso (adimensional)
-        T_exp  : temperatura experimental (C)
-        T_ref  : temperatura de referencia de la literatura (C)
-
-    Retorna:
-        k_ajustado : constante cinetica corregida a T_exp
-    """
+    """Corrige una constante cinetica de T_ref a T_exp usando el factor Q10."""
     return k_ref * (Q10 ** ((T_exp - T_ref) / 10.0))
 
 
 # =======================================================================
-# PARAMETROS DEL MODELO
+# SECCION 3 - PARAMETROS (todos como instancias de Param)
 # =======================================================================
-# Convencion de comentarios:
-#   [unidad] | Fuente: cita APA 7
-#   ⚠ WET LAB: indica que el valor debe reemplazarse con dato experimental
-#   ← Modulo X: indica que el valor proviene del output de otro modulo
-#   → Modulo X: indica que el valor calculado aqui alimenta a otro modulo
 
-# ================================================================
-# TEMPERATURAS
-# ================================================================
-T_exp = 16.0   # [C] | Temperatura de induccion experimental del proyecto iGEM 2025.
-               #        Estrategia de cold shock para mejorar plegamiento de dCas9.
-               #        Fuente: Vera, A., Gonzalez-Montalban, N., Aris, A., &
-               #        Villaverde, A. (2007). The conformational quality of
-               #        insoluble recombinant proteins is enhanced at low growth
-               #        temperatures. Biotechnology and Bioengineering, 96(6), 1101-1106.
-               #        https://doi.org/10.1002/bit.21218
+# --- TEMPERATURAS ---
+T_exp = Param(16.0, "C", "PROTOCOL",
+              "Temperatura de induccion del protocolo iGEM 2025. Estrategia cold "
+              "shock para mejorar plegamiento de dCas9.", rel_unc=0.0)
 
-T_ref = 37.0   # [C] | Temperatura de referencia para parametros de literatura.
-               #        La mayoria de los parametros de E. coli estan reportados a 37C.
+T_ref = Param(37.0, "C", "PROTOCOL",
+              "Temperatura de referencia estandar para parametros de E. coli en literatura.",
+              rel_unc=0.0)
 
-# ================================================================
-# TASA DE CRECIMIENTO DE E. coli
-# ================================================================
-mu_ref = 1.386  # [h^-1] | Tasa de crecimiento a 37C en medio LB.
-                #           Equivalente a tiempo de duplicacion ~30 min.
-                #           Fuente: Farewell, A., & Neidhardt, F. C. (1998). Effect of
-                #           temperature on in vivo protein synthetic capacity in
-                #           Escherichia coli. Journal of Bacteriology, 180(17), 4704-4710.
-                #           https://doi.org/10.1128/JB.180.17.4704-4710.1998
+# --- INDUCCION IPTG (funcion de Hill, adoptado del modelo de Valeria) ---
+IPTG_conc = Param(0.5e-3, "M", "PROTOCOL",
+                   "Concentracion de IPTG usada en el protocolo de induccion del equipo. "
+                   "Documentada como saturante para BL21(DE3) a esta concentracion.",
+                   rel_unc=0.0)
 
-Q10_mu = 2.5    # [adim] | Coeficiente Q10 para tasa de crecimiento de E. coli.
-                #           El crecimiento es muy sensible a temperatura (Q10 alto).
-                #           Fuente: Farewell & Neidhardt (1998). Journal of Bacteriology,
-                #           180(17), 4704-4710. https://doi.org/10.1128/JB.180.17.4704-4710.1998
-                # ⚠ WET LAB: medir curva de crecimiento a 600 nm a 16C post-induccion
-                #            para obtener mu(16C) real de su cultivo.
+K_IPTG = Param(0.1e-3, "M", "PLACEHOLDER",
+               "Constante de disociacion de LacI-IPTG. PLACEHOLDER: valor representativo "
+               "de la literatura, sin cita primaria verificada en ninguno de los dos "
+               "modelos del equipo. Referencia tentativa: Lewis, M. (2005). The lac "
+               "repressor. Comptes Rendus Biologies, 328(6), 521-548. "
+               "https://doi.org/10.1016/j.crvi.2005.02.004",
+               rel_unc=0.30,
+               wet_lab_note="Confirmar con curva de dosis-respuesta IPTG vs. expresion de reportero.")
 
-# ================================================================
-# T7 RNAP - SINTESIS Y DEGRADACION
-# ================================================================
-k_R_ref = 5.0   # [nM/h] | Tasa de sintesis de T7 RNAP bajo induccion IPTG en BL21(DE3).
-                #           Valor representativo post-induccion a saturacion.
-                #           Fuente: Carrier, T. A., & Keasling, J. D. (1999). Library of
-                #           synthetic 5' secondary structures to manipulate mRNA stability
-                #           in Escherichia coli. Biotechnology Progress, 15(1), 58-64.
-                #           https://doi.org/10.1021/bp9801143
-                # ⚠ WET LAB: valor de referencia; depende de la concentracion de IPTG
-                #            y cepa utilizada.
+n_Hill = Param(2.0, "adim", "LIT",
+               "Coeficiente de Hill para cooperatividad de LacI (dimero de dimeros). "
+               "Fuente: Oehler, S., et al. (1994). The three operators of the lac operon "
+               "cooperate in repression. EMBO Journal, 13(14), 3348-3355. "
+               "https://doi.org/10.1002/j.1460-2075.1994.tb06637.x",
+               rel_unc=0.10)
 
-Q10_tx = 1.8    # [adim] | Q10 para actividad de T7 RNAP (sintesis de RNAP activa Y
-                #           tasa de transcripcion por molecula de RNAP). Se usa para
-                #           ajustar tanto k_R como k_tx (ver nota de diseno abajo).
-                #           T7 RNAP es termoestable pero su actividad baja a 16C.
-                #           Fuente: Chamberlin, M., & Ring, J. (1973). Characterization
-                #           of T7-specific ribonucleic acid polymerase. Journal of
-                #           Biological Chemistry, 248(6), 2235-2244.
-                #           https://doi.org/10.1016/S0021-9258(19)44178-4
-                # NOTA DE DISENO: el documento fuente agrupa Q10_tx junto a k_R_ref,
-                #           pero el nombre ("tx" = transcripcion) tambien coincide con
-                #           k_tx_ref. Ante esta ambiguedad, se decidio aplicar el MISMO
-                #           Q10_tx a k_R_ref y a k_tx_ref, ya que ambos procesos dependen
-                #           de la actividad de la maquinaria de T7 RNAP. Esto es una
-                #           decision de modelado documentada, no un dato de literatura
-                #           adicional; WetLab puede desacoplarlos si obtiene datos mas
-                #           granulares en el futuro.
+# --- SINTESIS DE T7 RNAP ---
+# CAMBIO vs v1.0: se elimina la cita de Damian (Carrier & Keasling 1999, que trata
+# sobre estabilidad de ARNm, no sintesis de T7 RNAP). Se marca WETLAB_PEND con
+# rango plausible [5-50] nM/h, valor central 20.0.
+k_R_ref = Param(20.0, "nM/h", "WETLAB_PEND",
+                 "WETLAB_PEND: ninguno de los dos modelos del equipo tiene cita primaria "
+                 "verificable para este parametro. El modelo de Damian citaba incorrectamente "
+                 "a Carrier & Keasling (1999), que trata sobre estabilidad de ARNm (no sintesis "
+                 "de T7 RNAP). El modelo de Valeria usaba 50.0 sin cita. Rango plausible: "
+                 "5-50 nM/h, con valor central de 20 nM/h. Para calibracion, ver: Studier, "
+                 "F. W., & Moffatt, B. A. (1986). Use of bacteriophage T7 RNA polymerase to "
+                 "direct selective high-level expression. Journal of Molecular Biology, "
+                 "189(1), 113-130. https://doi.org/10.1016/0022-2836(86)90385-2",
+                 rel_unc=0.60, sampling="uniform",
+                 wet_lab_note="Medir con Western blot cuantitativo de T7 RNAP vs. tiempo "
+                              "tras induccion con IPTG, o con reportero fluorescente bajo "
+                              "promotor lacUV5 calibrado a concentracion absoluta (nM). "
+                              "PARAMETRO CON MAYOR IMPACTO EN LA DISCREPANCIA ENTRE MODELOS.")
 
-delta_R_ref = 0.2  # [h^-1] | Tasa de degradacion de T7 RNAP a 37C.
-                   #           Vida media ~3.5h. Proteina relativamente estable.
-                   #           Fuente: Perez-Perez, J., & Gutierrez, J. (1995).
-                   #           An arabinose-inducible expression vector, pAR3, compatible
-                   #           with ColE1-derived plasmids. Gene, 158(1), 141-142.
-                   #           https://doi.org/10.1016/0378-1119(95)00127-R
+Q10_tx = Param(1.8, "adim", "LIT",
+               "Q10 para transcripcion por T7 RNAP. Fuente: Chamberlin, M., & Ring, J. "
+               "(1973). Characterization of T7-specific ribonucleic acid polymerase. "
+               "Journal of Biological Chemistry, 248(6), 2235-2244. "
+               "https://doi.org/10.1016/S0021-9258(19)44178-4 "
+               "NOTA: este paper caracteriza T7 RNAP in vitro; el Q10 in vivo podria diferir.",
+               rel_unc=0.20)
 
-Q10_delta_R = 1.5  # [adim] | Q10 para degradacion de proteinas estables (T7 RNAP).
-                   #           Fuente: Goldberg, A. L. (2003). Protein degradation and
-                   #           protection against misfolded or damaged proteins. Nature,
-                   #           426(6968), 895-899. https://doi.org/10.1038/nature02263
+delta_R_ref = Param(0.2, "h^-1", "LIT",
+                     "Tasa de degradacion de T7 RNAP a 37C. Vida media ~3.5h. NOTA: la cita "
+                     "original (Perez-Perez & Gutierrez 1995) trata sobre un vector de "
+                     "expresion con arabinosa y no mide directamente la degradacion de T7 "
+                     "RNAP. Ambos modelos del equipo coincidieron en 0.20 h^-1 de forma "
+                     "independiente, lo que da cierta robustez al valor aunque la cita sea "
+                     "debil. Fuente de referencia general: Goldberg, A. L. (2003). Protein "
+                     "degradation and protection against misfolded or damaged proteins. "
+                     "Nature, 426(6968), 895-899. https://doi.org/10.1038/nature02263",
+                     rel_unc=0.30)
 
-# ================================================================
-# TRANSCRIPCION - TRANSCRITOS T_L Y T_2
-# ================================================================
-k_tx_ref = 2.0   # [h^-1 nM^-1] | Tasa de transcripcion por molecula de T7 RNAP.
-                 #                 Valor de referencia para promotor T7 fuerte (PT7).
-                 #                 Se asume k_tx1 = k_tx2 = k_tx_ref (promotores T7 en
-                 #                 tandem de fuerza equivalente). Supuesto documentado.
-                 #                 Fuente: Golding, I., Paulsson, J., Zawilski, S. M., &
-                 #                 Cox, E. C. (2005). Real-time kinetics of gene activity
-                 #                 in individual bacteria. Cell, 123(6), 1025-1036.
-                 #                 https://doi.org/10.1016/j.cell.2005.09.031
+Q10_delta_R = Param(1.5, "adim", "LIT",
+                     "Q10 para degradacion de proteinas estables (proteasas). Fuente: "
+                     "Goldberg, A. L. (2003). Nature, 426(6968), 895-899. "
+                     "https://doi.org/10.1038/nature02263",
+                     rel_unc=0.20)
 
-delta_m_ref = 6.0  # [h^-1] | Tasa de degradacion de ARNm en E. coli a 37C.
-                   #           Vida media de ARNm: ~5-8 min a 37C -> delta_m ~6-8 h^-1.
-                   #           Fuente: Bernstein, J. A., Khodursky, A. B., Lin, P. H.,
-                   #           Lin-Chao, S., & Cohen, S. N. (2002). Global analysis of
-                   #           mRNA decay and abundance in Escherichia coli at single-gene
-                   #           resolution using two-color fluorescent DNA microarrays.
-                   #           Proceedings of the National Academy of Sciences, 99(15),
-                   #           9697-9702. https://doi.org/10.1073/pnas.112318199
+# --- TRANSCRIPCION (T_L y T_2) ---
+k_tx_ref = Param(2.0, "h^-1 nM^-1", "LIT",
+                  "Tasa de transcripcion por molecula de T7 RNAP en E. coli in vivo. "
+                  "Fuente: Golding, I., Paulsson, J., Zawilski, S. M., & Cox, E. C. (2005). "
+                  "Real-time kinetics of gene activity in individual bacteria. Cell, "
+                  "123(6), 1025-1036. https://doi.org/10.1016/j.cell.2005.09.031 "
+                  "NOTA: el modelo de Valeria usaba 8.0 sin cita (4x mayor). Diferencia no "
+                  "resuelta; este valor (2.0) tiene respaldo bibliografico verificable.",
+                  rel_unc=0.40)
 
-Q10_delta_m = 2.0  # [adim] | Q10 para degradacion de ARNm.
-                   #           La degradacion de ARNm es enzimatica (RNasas) y sensible
-                   #           a temperatura. A 16C, los ARNm son mas estables.
-                   #           Fuente: Phadtare, S., & Severinov, K. (2010). RNA remodeling
-                   #           and gene regulation by cold shock proteins. RNA Biology,
-                   #           7(6), 788-795. https://doi.org/10.4161/rna.7.6.13482
+delta_m_ref = Param(6.0, "h^-1", "LIT",
+                     "Tasa de degradacion de ARNm en E. coli a 37C (vida media ~5-8 min). "
+                     "AMBOS modelos del equipo coincidieron en este valor de forma "
+                     "independiente. Fuente: Bernstein, J. A., Khodursky, A. B., Lin, P. H., "
+                     "Lin-Chao, S., & Cohen, S. N. (2002). Global analysis of mRNA decay and "
+                     "abundance in Escherichia coli at single-gene resolution using two-color "
+                     "fluorescent DNA microarrays. PNAS, 99(15), 9697-9702. "
+                     "https://doi.org/10.1073/pnas.112318199",
+                     rel_unc=0.20)
 
-# ================================================================
-# TRADUCCION - dCas9-AviTag (RBS1) Y BirA (RBS2)
-# ================================================================
-k_tl1_ref = 3.0  # [h^-1 nM^-1] | Tasa de traduccion RBS1 (dCas9-AviTag) a 37C.
-                 #                 Valor representativo para RBS de fuerza media-alta.
-                 #                 Fuente: Salis, H. M., Mirsky, E. A., & Voigt, C. A.
-                 #                 (2009). Automated design of synthetic ribosome binding
-                 #                 sites to control protein expression. Nature
-                 #                 Biotechnology, 27(10), 946-950.
-                 #                 https://doi.org/10.1038/nbt.1568
-                 # ⚠ WET LAB: usar RBS Calculator (Salis Lab, https://salislab.net/software/)
-                 #            con la secuencia real de RBS1 para obtener Translation
-                 #            Initiation Rate (TIR) especifico de su construccion.
+Q10_delta_m = Param(2.0, "adim", "LIT",
+                     "Q10 para degradacion de ARNm (RNasas). Proceso con mayor sensibilidad "
+                     "termica que proteasas -- justifica Q10 diferenciado. Fuente: Phadtare, "
+                     "S., & Severinov, K. (2010). RNA remodeling and gene regulation by cold "
+                     "shock proteins. RNA Biology, 7(6), 788-795. "
+                     "https://doi.org/10.4161/rna.7.6.13482",
+                     rel_unc=0.20)
 
-k_tl2_ref = 2.0  # [h^-1 nM^-1] | Tasa de traduccion RBS2 (BirA) a 37C.
-                 #                 Se asume RBS2 ligeramente menos fuerte que RBS1.
-                 #                 Fuente: Salis et al. (2009). Nature Biotechnology,
-                 #                 27(10), 946-950. https://doi.org/10.1038/nbt.1568
-                 # ⚠ WET LAB: usar RBS Calculator con la secuencia real de RBS2.
+# --- TRADUCCION -- parametrizacion por RBS (adoptado del enfoque de Valeria) ---
+k_tl0_ref = Param(3.5, "h^-1 nM^-1", "LIT",
+                   "Tasa base de traduccion en E. coli (ribosoma estandar). Fuente: Salis, "
+                   "H. M., Mirsky, E. A., & Voigt, C. A. (2009). Automated design of "
+                   "synthetic ribosome binding sites to control protein expression. Nature "
+                   "Biotechnology, 27(10), 946-950. https://doi.org/10.1038/nbt.1568",
+                   rel_unc=0.30)
 
-Q10_tl = 2.2     # [adim] | Q10 para traduccion (actividad ribosomal).
-                 #           Los ribosomas son muy sensibles a temperatura baja.
-                 #           Fuente: Broeze, R. J., Solomon, C. J., & Pope, D. H. (1978).
-                 #           Effects of low temperature on in vivo and in vitro protein
-                 #           synthesis in Escherichia coli and Pseudomonas fluorescens.
-                 #           Journal of Bacteriology, 134(3), 861-874.
-                 #           https://doi.org/10.1128/jb.134.3.861-874.1978
+RBS_str_1 = Param(1.0, "adim", "WETLAB_PEND",
+                   "Fuerza relativa del RBS1 (dCas9-AviTag) normalizada respecto a k_tl0. "
+                   "Valor nominal 1.0 = fuerza estandar. WETLAB_PEND: calcular con RBS "
+                   "Calculator v2.1 (Salis Lab, https://salislab.net/software/) usando la "
+                   "secuencia real del RBS1 de la construccion. El TIR calculado se "
+                   "convierte a RBS_str dividiendo por el TIR de la secuencia de referencia.",
+                   rel_unc=0.30,
+                   wet_lab_note="Ingresar secuencia real del RBS1 en RBS Calculator para obtener TIR.")
 
-# ================================================================
-# DEGRADACION DE PROTEINAS
-# ================================================================
-delta_p_ref = 0.05  # [h^-1] | Tasa de degradacion de proteinas estables a 37C.
-                    #           Vida media ~14h. dCas9 y BirA son proteinas estables.
-                    #           Fuente: Maurizi, M. R. (1992). Proteases and protein
-                    #           degradation in Escherichia coli. Experientia, 48(2),
-                    #           178-201. https://doi.org/10.1007/BF01923511
+RBS_str_2 = Param(0.57, "adim", "DERIVED",
+                   "Fuerza relativa del RBS2 (BirA) = k_tl2_v1 / k_tl1_v1 = 2.0 / 3.5. "
+                   "Derivado de los valores usados en el modelo v1.0 de Damian. "
+                   "WETLAB_PEND: calibrar con RBS Calculator igual que RBS_str_1.",
+                   rel_unc=0.30,
+                   wet_lab_note="Ingresar secuencia real del RBS2 en RBS Calculator para obtener TIR.")
 
-Q10_delta_p = 1.5   # [adim] | Q10 para degradacion de proteinas (proteasas).
-                    #           Fuente: Goldberg, A. L. (2003). Nature, 426(6968), 895-899.
-                    #           https://doi.org/10.1038/nature02263
+Q10_tl = Param(2.2, "adim", "LIT",
+               "Q10 para traduccion (actividad ribosomal) en E. coli. Fuente: Broeze, R. J., "
+               "Solomon, C. J., & Pope, D. H. (1978). Effects of low temperature on in vivo "
+               "and in vitro protein synthesis in Escherichia coli and Pseudomonas "
+               "fluorescens. Journal of Bacteriology, 134(3), 861-874. "
+               "https://doi.org/10.1128/jb.134.3.861-874.1978",
+               rel_unc=0.15)
 
-# ================================================================
-# PARAMETROS DE DISENO GENETICO
-# ================================================================
-f_rt = 0.2   # [adim] | Eficiencia de read-through del Promotor T7 #1 hacia BirA.
-             #           Fraccion de T7 RNAP que inicia en Promotor #1 y continua
-             #           transcribiendo hasta incluir la ORF de BirA.
-             #           Rango plausible en sistemas T7 sin terminador intermedio: 0.1-0.5.
-             #           Fuente: Masulis, I. S., et al. (2015). Efficiency of
-             #           transcription termination in E. coli T7 systems.
-             #           Molecular Microbiology, 96(5), 962-978. Valor placeholder.
-             # ⚠ WET LAB: medir por RT-qPCR comparando abundancia relativa de la
-             #            region 3' de dCas9 vs. region de BirA en el ARNm total.
-             #            Este es el parametro mas incierto del modulo.
-             #            NOTA: se explora f_rt = 0.05, 0.10, 0.20, 0.30, 0.50 en el
-             #            analisis de sensibilidad (Figura 3).
+# --- DEGRADACION DE PROTEINAS (diferenciada, adoptado de Valeria) ---
+delta_p_dCas9_ref = Param(0.05, "h^-1", "LIT",
+                           "Tasa de degradacion de dCas9-AviTag a 37C (vida media ~14h). "
+                           "Proteina estable: la degradacion es lenta. AMBOS modelos del "
+                           "equipo coincidieron en este valor de forma independiente. "
+                           "Fuente: Maurizi, M. R. (1992). Proteases and protein degradation "
+                           "in Escherichia coli. Experientia, 48(2), 178-201. "
+                           "https://doi.org/10.1007/BF01923511",
+                           rel_unc=0.30)
 
-# ================================================================
-# FACTOR DE PLEGAMIENTO - PUENTE CON MODULO C
-# ================================================================
-phi_16 = 0.60  # [adim] | Fraccion de dCas9-AviTag correctamente plegada a 16C.
-               #           La induccion en frio reduce la formacion de cuerpos de
-               #           inclusion en proteinas grandes y de plegamiento dificil.
-               #           Rango esperado a 16C: 0.4-0.8.
-               #           Fuente: Vera et al. (2007). Biotechnology and
-               #           Bioengineering, 96(6), 1101-1106.
-               #           https://doi.org/10.1002/bit.21218
-               # ⚠ WET LAB PRIORITARIO: medir fraccion soluble vs. insoluble por
-               #            SDS-PAGE tras lisis a 16C y 37C. Este es el dato
-               #            experimental de mayor impacto en el modelo completo.
-               # → Modulo C: multiplica a P_dCas9(20h) para dar la proteina
-               #            funcional disponible para purificacion.
+delta_p_BirA_ref = Param(0.08, "h^-1", "PLACEHOLDER",
+                          "Tasa de degradacion de BirA a 37C. Vida media ~8.7h. PLACEHOLDER: "
+                          "diferenciada de dCas9 siguiendo el modelo de Valeria (mas "
+                          "granular), pero sin cita primaria verificada en ningun modelo. "
+                          "Referencia general: Maurizi, M. R. (1992). Experientia, 48(2), "
+                          "178-201. https://doi.org/10.1007/BF01923511",
+                          rel_unc=0.30,
+                          wet_lab_note="Medir degradacion de BirA por pulse-chase o Western "
+                                       "blot en ausencia de sintesis nueva (anadiendo rifampicina).")
 
-phi_37 = 0.15  # [adim] | Fraccion de dCas9-AviTag plegada a 37C (referencia, no se
-               #           usa en la simulacion principal a 16C, se deja documentada
-               #           para comparacion futura).
-               #           Alta tendencia a inclusion a temperatura estandar.
-               #           Fuente: Kusano, S., Ding, Q., Fujita, N., & Ishihama, A.
-               #           (1993). Functional differences between SigmaD and SigmaS
-               #           Escherichia coli RNA polymerase. Molecular Microbiology,
-               #           10(3), 575-584. Estimado general.
-               # ⚠ WET LAB: confirmar con experimento comparativo de induccion.
+Q10_delta_p = Param(1.5, "adim", "LIT",
+                     "Q10 para degradacion de proteinas (proteasas). Proceso con menor "
+                     "sensibilidad termica que RNasas -- justifica Q10 diferenciado respecto "
+                     "a degradacion de ARNm. Fuente: Goldberg, A. L. (2003). Nature, "
+                     "426(6968), 895-899. https://doi.org/10.1038/nature02263",
+                     rel_unc=0.20)
 
-# ================================================================
-# CONDICIONES INICIALES Y TIEMPO DE SIMULACION
-# ================================================================
-R0        = 0.0   # [nM] | T7 RNAP inicial = 0 (induccion empieza en t=0)
-T_L0      = 0.0   # [nM] | Transcrito largo inicial = 0
-T_20      = 0.0   # [nM] | Transcrito corto inicial = 0
-P_dCas9_0 = 0.0   # [nM] | dCas9-AviTag inicial = 0
-P_BirA_0  = 0.0   # [nM] | BirA inicial = 0
+# --- CRECIMIENTO CELULAR ---
+mu_ref = Param(1.386, "h^-1", "LIT",
+               "Tasa de crecimiento de E. coli a 37C en LB (t_duplicacion ~30 min). Fuente: "
+               "Farewell, A., & Neidhardt, F. C. (1998). Effect of temperature on in vivo "
+               "protein synthetic capacity in Escherichia coli. Journal of Bacteriology, "
+               "180(17), 4704-4710. https://doi.org/10.1128/JB.180.17.4704-4710.1998",
+               rel_unc=0.10,
+               wet_lab_note="Medir curva de crecimiento OD600 a 16C post-induccion para "
+                            "obtener mu(16C) real.")
 
-t_start = 0.0    # [h] | Inicio de la induccion
-t_end   = 20.0   # [h] | Tiempo de induccion experimental
+Q10_mu = Param(2.5, "adim", "LIT",
+               "Q10 para tasa de crecimiento de E. coli. Fuente: Farewell, A., & Neidhardt, "
+               "F. C. (1998). Journal of Bacteriology, 180(17), 4704-4710. "
+               "https://doi.org/10.1128/JB.180.17.4704-4710.1998",
+               rel_unc=0.20)
+
+# --- PARAMETROS DE DISENO GENETICO (los mas inciertos del sistema) ---
+# CAMBIO vs v1.0: se elimina la cita fabricada "Masulis et al. 2015" de Damian.
+f_rt = Param(0.20, "adim", "WETLAB_PEND",
+             "Eficiencia de read-through del Promotor T7 #1 hacia la ORF de BirA. "
+             "WETLAB_PEND: ninguno de los dos modelos tiene cita primaria verificada. "
+             "Damian citaba \"Masulis et al. (2015)\" -- paper NO encontrado en ninguna "
+             "base de datos (posible cita fabricada). Valeria marco honestamente como "
+             "WETLAB_PEND con valor 0.40. Rango plausible en sistemas T7 sin terminador "
+             "intermedio: 0.10-0.50. Valor central de 0.20 usado como punto de partida. "
+             "Para referencia general sobre read-through T7: Peters, J. M., et al. (2012). "
+             "Rho and NusG suppress pervasive antisense transcription in Escherichia coli. "
+             "Genes & Development, 26(23), 2621-2633. https://doi.org/10.1101/gad.196741.112",
+             rel_unc=0.50, sampling="uniform",
+             wet_lab_note="Medir por RT-qPCR comparando abundancia relativa de la region 3' "
+                          "de dCas9 vs. region de BirA en el ARNm total del cultivo. Este es "
+                          "el parametro de diseno mas incierto del modulo. "
+                          "PRIORIDAD DE MEDICION: CRITICA.")
+
+# CAMBIO vs v1.0: se mantiene phi_16 (unica cita primaria verificada del bloque).
+phi_16 = Param(0.60, "adim", "LIT",
+               "Fraccion de dCas9-AviTag correctamente plegada a 16C. AMBOS modelos "
+               "convergieron de forma independiente (Damian: 0.60, Valeria: 0.65 -- "
+               "diferencia del 8%). Fuente: Vera, A., Gonzalez-Montalban, N., Aris, A., & "
+               "Villaverde, A. (2007). The conformational quality of insoluble recombinant "
+               "proteins is enhanced at low growth temperatures. Biotechnology and "
+               "Bioengineering, 96(6), 1101-1106. https://doi.org/10.1002/bit.21218 "
+               "Este es el unico parametro de diseno con cita primaria verificable en "
+               "ambos modelos.",
+               rel_unc=0.15,
+               wet_lab_note="Confirmar por SDS-PAGE: comparar fraccion soluble vs. "
+                            "insoluble tras lisis del cultivo a 16C. PRIORIDAD: ALTA.")
+
+# CAMBIO vs v1.0: se elimina la cita tematicamente incorrecta de Damian (Kusano et al. 1993).
+phi_37 = Param(0.20, "adim", "WETLAB_PEND",
+               "Fraccion de dCas9-AviTag correctamente plegada a 37C (referencia). "
+               "WETLAB_PEND: Damian citaba incorrectamente a Kusano et al. (1993), paper "
+               "que trata sobre factores sigma de la ARN polimerasa (sin relacion con "
+               "plegamiento de proteinas recombinantes). Valeria usaba 0.30 sin cita. "
+               "Ninguno verificado. Valor 0.20 como punto medio del rango plausible "
+               "[0.10-0.35]. Para referencia general: Baneyx, F., & Mujacic, M. (2004). "
+               "Recombinant protein folding and misfolding in Escherichia coli. Nature "
+               "Biotechnology, 22(11), 1399-1408. https://doi.org/10.1038/nbt1029",
+               rel_unc=0.40, sampling="uniform",
+               wet_lab_note="Medir por SDS-PAGE comparando fraccion soluble vs. insoluble "
+                            "tras lisis a 37C. Indispensable para comparar con phi_16 y "
+                            "cuantificar la mejora del cold shock.")
+
+# Diccionario con todos los Param, para iterar en las tablas de output
+TODOS_LOS_PARAMS = {
+    "T_exp": T_exp, "T_ref": T_ref, "IPTG_conc": IPTG_conc, "K_IPTG": K_IPTG,
+    "n_Hill": n_Hill, "k_R_ref": k_R_ref, "Q10_tx": Q10_tx, "delta_R_ref": delta_R_ref,
+    "Q10_delta_R": Q10_delta_R, "k_tx_ref": k_tx_ref, "delta_m_ref": delta_m_ref,
+    "Q10_delta_m": Q10_delta_m, "k_tl0_ref": k_tl0_ref, "RBS_str_1": RBS_str_1,
+    "RBS_str_2": RBS_str_2, "Q10_tl": Q10_tl, "delta_p_dCas9_ref": delta_p_dCas9_ref,
+    "delta_p_BirA_ref": delta_p_BirA_ref, "Q10_delta_p": Q10_delta_p, "mu_ref": mu_ref,
+    "Q10_mu": Q10_mu, "f_rt": f_rt, "phi_16": phi_16, "phi_37": phi_37,
+}
 
 
 # =======================================================================
-# AJUSTE DE TODAS LAS CONSTANTES CINETICAS A 16C (Q10)
+# SECCION 4 - SISTEMA DE ODEs
 # =======================================================================
-k_R_adj       = ajustar_Q10(k_R_ref, Q10_tx, T_exp, T_ref)
-delta_R_adj   = ajustar_Q10(delta_R_ref, Q10_delta_R, T_exp, T_ref)
-mu_adj        = ajustar_Q10(mu_ref, Q10_mu, T_exp, T_ref)
-k_tx1_adj     = ajustar_Q10(k_tx_ref, Q10_tx, T_exp, T_ref)   # promotor T7 #1
-k_tx2_adj     = ajustar_Q10(k_tx_ref, Q10_tx, T_exp, T_ref)   # promotor T7 #2 (= k_tx1_adj, supuesto)
-delta_m_adj   = ajustar_Q10(delta_m_ref, Q10_delta_m, T_exp, T_ref)
-k_tl1_adj     = ajustar_Q10(k_tl1_ref, Q10_tl, T_exp, T_ref)
-k_tl2_adj     = ajustar_Q10(k_tl2_ref, Q10_tl, T_exp, T_ref)
-delta_p_adj   = ajustar_Q10(delta_p_ref, Q10_delta_p, T_exp, T_ref)
-
-
-def imprimir_tabla_parametros():
+def construir_params_16C(iptg_conc, k_iptg, n_hill, k_r_ref, q10_tx, delta_r_ref,
+                          q10_delta_r, k_tx_ref_v, delta_m_ref_v, q10_delta_m,
+                          k_tl0_ref_v, rbs1, rbs2, q10_tl, delta_p_dcas9_ref_v,
+                          delta_p_bira_ref_v, q10_delta_p, mu_ref_v, q10_mu,
+                          f_rt_val, T_exp_v=16.0, T_ref_v=37.0):
     """
-    Imprime una tabla comparativa de todas las constantes cineticas del
-    sistema a 37C (valor de literatura) y a 16C (valor ajustado por Q10),
-    junto con el factor de cambio resultante.
+    Construye el diccionario de VALORES NUMERICOS (ya ajustados a T_exp_v)
+    que usa la funcion de ODEs. Recibe valores nominales o muestreados
+    (floats), nunca objetos Param -- eso permite reusar esta funcion tanto
+    para la corrida determinista como para cada iteracion de Monte Carlo.
     """
-    filas = [
-        ("k_R (sintesis T7 RNAP)",     "nM/h",       k_R_ref,      k_R_adj,     Q10_tx),
-        ("delta_R (degrad. T7 RNAP)",  "h^-1",       delta_R_ref,  delta_R_adj, Q10_delta_R),
-        ("mu (crecimiento)",           "h^-1",       mu_ref,       mu_adj,      Q10_mu),
-        ("k_tx1 = k_tx2 (transcr.)",   "h^-1 nM^-1", k_tx_ref,     k_tx1_adj,   Q10_tx),
-        ("delta_m (degrad. ARNm)",     "h^-1",       delta_m_ref,  delta_m_adj, Q10_delta_m),
-        ("k_tl1 (traducc. RBS1)",      "h^-1 nM^-1", k_tl1_ref,    k_tl1_adj,   Q10_tl),
-        ("k_tl2 (traducc. RBS2)",      "h^-1 nM^-1", k_tl2_ref,    k_tl2_adj,   Q10_tl),
-        ("delta_p (degrad. proteina)", "h^-1",       delta_p_ref,  delta_p_adj, Q10_delta_p),
-    ]
-    print("-" * 90)
-    print(f"{'Parametro':<28s}{'Unidad':<13s}{'Valor 37C':>12s}{'Valor 16C':>12s}{'Q10':>8s}{'Factor cambio':>16s}")
-    print("-" * 90)
-    for nombre, unidad, v37, v16, q10 in filas:
-        factor_cambio = v16 / v37 if v37 != 0 else float("nan")
-        print(f"{nombre:<28s}{unidad:<13s}{v37:>12.4f}{v16:>12.4f}{q10:>8.2f}{factor_cambio:>16.3f}")
-    print("-" * 90)
+    induction_factor = (iptg_conc ** n_hill) / (k_iptg ** n_hill + iptg_conc ** n_hill)
+
+    k_R = ajustar_Q10(k_r_ref, q10_tx, T_exp_v, T_ref_v)
+    delta_R = ajustar_Q10(delta_r_ref, q10_delta_r, T_exp_v, T_ref_v)
+    k_tx = ajustar_Q10(k_tx_ref_v, q10_tx, T_exp_v, T_ref_v)
+    delta_m = ajustar_Q10(delta_m_ref_v, q10_delta_m, T_exp_v, T_ref_v)
+
+    k_tl1_ref_v = k_tl0_ref_v * rbs1
+    k_tl2_ref_v = k_tl0_ref_v * rbs2
+    k_tl1 = ajustar_Q10(k_tl1_ref_v, q10_tl, T_exp_v, T_ref_v)
+    k_tl2 = ajustar_Q10(k_tl2_ref_v, q10_tl, T_exp_v, T_ref_v)
+
+    delta_p_dCas9 = ajustar_Q10(delta_p_dcas9_ref_v, q10_delta_p, T_exp_v, T_ref_v)
+    delta_p_BirA = ajustar_Q10(delta_p_bira_ref_v, q10_delta_p, T_exp_v, T_ref_v)
+
+    mu = ajustar_Q10(mu_ref_v, q10_mu, T_exp_v, T_ref_v)
+
+    return {
+        "k_R": k_R, "induction_factor": induction_factor, "delta_R": delta_R,
+        "k_tx": k_tx, "delta_m": delta_m,
+        "k_tl1": k_tl1, "k_tl2": k_tl2,
+        "delta_p_dCas9": delta_p_dCas9, "delta_p_BirA": delta_p_BirA,
+        "mu": mu, "f_rt": f_rt_val,
+    }
 
 
-print("=" * 90)
-print("MODULO A - Produccion de dCas9-AviTag y BirA en E. coli (T7 RNAP, 16C, 20h)")
-print("=" * 90)
-print("Tabla comparativa de parametros cineticos: 37C (literatura) vs 16C (ajustado por Q10)")
-imprimir_tabla_parametros()
-
-
-# =======================================================================
-# SISTEMA DE 5 ODEs
-# =======================================================================
-def sistema_odes(t, y, params):
+def sistema_odes(t, y, p):
     """
-    Sistema de 5 ecuaciones diferenciales acopladas que describe la
-    produccion de T7 RNAP, dos transcritos (T_L, T_2) y dos proteinas
-    (dCas9-AviTag, BirA) durante la induccion a 16C.
-
-    Variables de estado (vector y):
-        y[0] = R        -> [T7 RNAP activa] (nM)
-        y[1] = T_L      -> [transcrito largo] (nM)
-        y[2] = T_2      -> [transcrito corto] (nM)
-        y[3] = P_dCas9  -> [dCas9-AviTag total] (nM)
-        y[4] = P_BirA   -> [BirA total] (nM)
+    Sistema de 5 ODEs. y = [R, T_L, T_2, P_dCas9, P_BirA].
+    p es un diccionario de VALORES NUMERICOS ya ajustados a 16C
+    (construido con construir_params_16C).
     """
-    # Proteccion contra valores negativos por error numerico del integrador
     R = max(y[0], 0.0)
     T_L = max(y[1], 0.0)
     T_2 = max(y[2], 0.0)
     P_dCas9 = max(y[3], 0.0)
     P_BirA = max(y[4], 0.0)
 
-    k_R = params["k_R"]
-    delta_R = params["delta_R"]
-    mu = params["mu"]
-    k_tx1 = params["k_tx1"]
-    k_tx2 = params["k_tx2"]
-    delta_m = params["delta_m"]
-    k_tl1 = params["k_tl1"]
-    k_tl2 = params["k_tl2"]
-    delta_p = params["delta_p"]
-    f_rt_local = params["f_rt"]
+    dR = p["k_R"] * p["induction_factor"] - (p["delta_R"] + p["mu"]) * R
+    dT_L = p["k_tx"] * R - (p["delta_m"] + p["mu"]) * T_L
+    dT_2 = p["k_tx"] * R - (p["delta_m"] + p["mu"]) * T_2
+    dP_dCas9 = p["k_tl1"] * T_L - (p["delta_p_dCas9"] + p["mu"]) * P_dCas9
+    dP_BirA = p["k_tl2"] * (p["f_rt"] * T_L + T_2) - (p["delta_p_BirA"] + p["mu"]) * P_BirA
 
-    # --- ODE 1: T7 RNAP ---
-    # Sintesis constante post-induccion (k_R) menos degradacion propia
-    # (delta_R*R) menos dilucion por crecimiento celular (mu*R).
-    dR_dt = k_R - (delta_R + mu) * R
+    return [dR, dT_L, dT_2, dP_dCas9, dP_BirA]
 
-    # --- ODE 2: Transcrito largo T_L (dCas9-AviTag + BirA por read-through) ---
-    # Sintesis proporcional a la T7 RNAP disponible (k_tx1*R) menos
-    # degradacion de ARNm (delta_m*T_L) menos dilucion (mu*T_L).
-    dT_L_dt = k_tx1 * R - (delta_m + mu) * T_L
 
-    # --- ODE 3: Transcrito corto T_2 (solo BirA) ---
-    # Misma logica que T_L, pero desde el Promotor T7 #2.
-    dT_2_dt = k_tx2 * R - (delta_m + mu) * T_2
+def params_nominales_dict():
+    """Diccionario de valores NOMINALES (no muestreados) para la corrida determinista."""
+    return construir_params_16C(
+        IPTG_conc.value, K_IPTG.value, n_Hill.value, k_R_ref.value, Q10_tx.value,
+        delta_R_ref.value, Q10_delta_R.value, k_tx_ref.value, delta_m_ref.value,
+        Q10_delta_m.value, k_tl0_ref.value, RBS_str_1.value, RBS_str_2.value,
+        Q10_tl.value, delta_p_dCas9_ref.value, delta_p_BirA_ref.value, Q10_delta_p.value,
+        mu_ref.value, Q10_mu.value, f_rt.value, T_exp.value, T_ref.value,
+    )
 
-    # --- ODE 4: Proteina dCas9-AviTag ---
-    # Traduccion solo desde T_L (via RBS1) menos degradacion de proteina
-    # (delta_p*P_dCas9) menos dilucion (mu*P_dCas9).
-    dP_dCas9_dt = k_tl1 * T_L - (delta_p + mu) * P_dCas9
 
-    # --- ODE 5: Proteina BirA ---
-    # Traduccion desde DOS fuentes: el read-through del transcrito largo
-    # (f_rt*T_L) y el transcrito corto propio (T_2), ambas via RBS2;
-    # menos degradacion y dilucion.
-    dP_BirA_dt = k_tl2 * (f_rt_local * T_L + T_2) - (delta_p + mu) * P_BirA
-
-    return [dR_dt, dT_L_dt, dT_2_dt, dP_dCas9_dt, dP_BirA_dt]
+def params_muestreados_dict():
+    """Diccionario de valores MUESTREADOS (Monte Carlo) para una iteracion."""
+    return construir_params_16C(
+        IPTG_conc.sample() if IPTG_conc.rel_unc > 0 else IPTG_conc.value,
+        K_IPTG.sample() if K_IPTG.rel_unc > 0 else K_IPTG.value,
+        n_Hill.sample() if n_Hill.rel_unc > 0 else n_Hill.value,
+        k_R_ref.sample() if k_R_ref.rel_unc > 0 else k_R_ref.value,
+        Q10_tx.sample() if Q10_tx.rel_unc > 0 else Q10_tx.value,
+        delta_R_ref.sample() if delta_R_ref.rel_unc > 0 else delta_R_ref.value,
+        Q10_delta_R.sample() if Q10_delta_R.rel_unc > 0 else Q10_delta_R.value,
+        k_tx_ref.sample() if k_tx_ref.rel_unc > 0 else k_tx_ref.value,
+        delta_m_ref.sample() if delta_m_ref.rel_unc > 0 else delta_m_ref.value,
+        Q10_delta_m.sample() if Q10_delta_m.rel_unc > 0 else Q10_delta_m.value,
+        k_tl0_ref.sample() if k_tl0_ref.rel_unc > 0 else k_tl0_ref.value,
+        RBS_str_1.sample() if RBS_str_1.rel_unc > 0 else RBS_str_1.value,
+        RBS_str_2.sample() if RBS_str_2.rel_unc > 0 else RBS_str_2.value,
+        Q10_tl.sample() if Q10_tl.rel_unc > 0 else Q10_tl.value,
+        delta_p_dCas9_ref.sample() if delta_p_dCas9_ref.rel_unc > 0 else delta_p_dCas9_ref.value,
+        delta_p_BirA_ref.sample() if delta_p_BirA_ref.rel_unc > 0 else delta_p_BirA_ref.value,
+        Q10_delta_p.sample() if Q10_delta_p.rel_unc > 0 else Q10_delta_p.value,
+        mu_ref.sample() if mu_ref.rel_unc > 0 else mu_ref.value,
+        Q10_mu.sample() if Q10_mu.rel_unc > 0 else Q10_mu.value,
+        f_rt.sample() if f_rt.rel_unc > 0 else f_rt.value,
+        T_exp.value, T_ref.value,
+    )
 
 
 # =======================================================================
-# RESOLUCION NUMERICA
+# SECCION 5 - SIMULACION DETERMINISTICA (corrida nominal)
 # =======================================================================
-parametros_odes = {
-    "k_R": k_R_adj,
-    "delta_R": delta_R_adj,
-    "mu": mu_adj,
-    "k_tx1": k_tx1_adj,
-    "k_tx2": k_tx2_adj,
-    "delta_m": delta_m_adj,
-    "k_tl1": k_tl1_adj,
-    "k_tl2": k_tl2_adj,
-    "delta_p": delta_p_adj,
-    "f_rt": f_rt,
-}
+Y0 = [0.0, 0.0, 0.0, 0.0, 0.0]
+T_END = 20.0
+t_eval_fino = np.linspace(0, T_END, 5000)
 
-y0 = [R0, T_L0, T_20, P_dCas9_0, P_BirA_0]
-t_eval = np.linspace(t_start, t_end, 5000)   # alta resolucion en horas
-
-sol = solve_ivp(
-    fun=sistema_odes,
-    t_span=(t_start, t_end),
-    y0=y0,
-    method="Radau",   # metodo robusto para sistemas stiff (ver Seccion 12 al final)
-    t_eval=t_eval,
-    dense_output=True,
-    args=(parametros_odes,),
-    rtol=1e-8,
-    atol=1e-10,
+params_nom = params_nominales_dict()
+sol_nominal = solve_ivp(
+    fun=sistema_odes, t_span=(0, T_END), y0=Y0, method="Radau",
+    t_eval=t_eval_fino, args=(params_nom,), rtol=1e-8, atol=1e-10,
 )
 
-if sol.success:
-    print("\nIntegracion numerica: EXITOSA (Radau convergio correctamente)")
+print("=" * 90)
+print("MODULO A v2.0 - Modelo Unificado de Equipo (Damian + Valeria)")
+print("=" * 90)
+if sol_nominal.success:
+    print("Integracion determinista: EXITOSA (Radau convergio correctamente)")
 else:
-    print("\nADVERTENCIA: la integracion numerica NO convergio.")
-    print(f"Mensaje del solver: {sol.message}")
+    print(f"ADVERTENCIA: integracion determinista NO convergio: {sol_nominal.message}")
 
-# Extraccion de las 5 series de tiempo, con clip de seguridad >= 0
-t_horas = sol.t
-R_t = np.maximum(sol.y[0], 0.0)
-T_L_t = np.maximum(sol.y[1], 0.0)
-T_2_t = np.maximum(sol.y[2], 0.0)
-P_dCas9_t = np.maximum(sol.y[3], 0.0)
-P_BirA_t = np.maximum(sol.y[4], 0.0)
+R_t = np.maximum(sol_nominal.y[0], 0.0)
+T_L_t = np.maximum(sol_nominal.y[1], 0.0)
+T_2_t = np.maximum(sol_nominal.y[2], 0.0)
+P_dCas9_t = np.maximum(sol_nominal.y[3], 0.0)
+P_BirA_t = np.maximum(sol_nominal.y[4], 0.0)
+t_horas = sol_nominal.t
+
+P_dCas9_20h_det = P_dCas9_t[-1]
+P_BirA_20h_det = P_BirA_t[-1]
 
 
 # =======================================================================
-# VISUALIZACION - FIGURA 1: DINAMICA COMPLETA (2x3)
+# SECCION 6 - MONTE CARLO (propagacion de incertidumbre)
 # =======================================================================
-fig1 = plt.figure(figsize=(18, 10))
-gs1 = gridspec.GridSpec(2, 3, figure=fig1)
-fig1.suptitle("Modulo A - Dinamica completa de produccion (16C, 20h)", fontsize=14, fontweight="bold")
+N_MC = 500
+t_eval_mc = np.linspace(0, T_END, 200)  # malla mas gruesa para no saturar memoria/tiempo
 
-ax_R = fig1.add_subplot(gs1[0, 0])
-ax_T = fig1.add_subplot(gs1[0, 1])
-ax_P = fig1.add_subplot(gs1[0, 2])
-ax_R_zoom = fig1.add_subplot(gs1[1, 0])
-ax_T_zoom = fig1.add_subplot(gs1[1, 1])
-ax_P_zoom = fig1.add_subplot(gs1[1, 2])
+mc_P_dCas9_20h = []
+mc_P_BirA_20h = []
+mc_P_dCas9_traj = []
+mc_P_BirA_traj = []
+n_exitosas = 0
+n_fallidas = 0
 
-# --- Panel (1,1): R(t) vista completa ---
-ax_R.plot(t_horas, R_t, color="tab:brown", linewidth=2)
-ax_R.set_xlabel("Tiempo (h)")
-ax_R.set_ylabel("[T7 RNAP] (nM)")
-ax_R.set_title("(1,1) T7 RNAP - vista completa (0-20h)")
-ax_R.grid(alpha=0.3)
+print(f"\nCorriendo Monte Carlo (N={N_MC})...")
+for i in range(N_MC):
+    params_i = params_muestreados_dict()
+    sol_i = solve_ivp(
+        fun=sistema_odes, t_span=(0, T_END), y0=Y0, method="Radau",
+        t_eval=t_eval_mc, args=(params_i,), rtol=1e-7, atol=1e-9,
+    )
+    if sol_i.success:
+        n_exitosas += 1
+        P_dCas9_i = np.maximum(sol_i.y[3], 0.0)
+        P_BirA_i = np.maximum(sol_i.y[4], 0.0)
+        mc_P_dCas9_20h.append(P_dCas9_i[-1])
+        mc_P_BirA_20h.append(P_BirA_i[-1])
+        mc_P_dCas9_traj.append(P_dCas9_i)
+        mc_P_BirA_traj.append(P_BirA_i)
+    else:
+        n_fallidas += 1
 
-# --- Panel (1,2): T_L(t) y T_2(t) vista completa ---
-ax_T.plot(t_horas, T_L_t, color="tab:orange", linewidth=2, label="T_L (transcrito largo)")
-ax_T.plot(t_horas, T_2_t, color="tab:cyan", linewidth=2, label="T_2 (transcrito corto)")
-ax_T.set_xlabel("Tiempo (h)")
-ax_T.set_ylabel("Concentracion (nM)")
-ax_T.set_title("(1,2) Transcritos - vista completa (0-20h)")
-ax_T.legend(loc="best", fontsize=9)
-ax_T.grid(alpha=0.3)
+mc_P_dCas9_20h = np.array(mc_P_dCas9_20h)
+mc_P_BirA_20h = np.array(mc_P_BirA_20h)
+mc_P_dCas9_traj = np.array(mc_P_dCas9_traj)   # shape (n_exitosas, len(t_eval_mc))
+mc_P_BirA_traj = np.array(mc_P_BirA_traj)
 
-# --- Panel (1,3): P_dCas9(t) y P_BirA(t) vista completa ---
-ax_P.plot(t_horas, P_dCas9_t, color="tab:green", linewidth=2, label="P_dCas9-AviTag")
-ax_P.plot(t_horas, P_BirA_t, color="tab:purple", linewidth=2, label="P_BirA")
-ax_P.set_xlabel("Tiempo (h)")
-ax_P.set_ylabel("Concentracion (nM)")
-ax_P.set_title("(1,3) Proteinas - vista completa (0-20h)")
-ax_P.legend(loc="best", fontsize=9)
-ax_P.grid(alpha=0.3)
+print(f"Monte Carlo completo: {n_exitosas} corridas exitosas, {n_fallidas} fallidas.")
 
-# --- Datos de zoom (primeras 2h), usando la solucion densa para alta resolucion ---
-t_zoom = np.linspace(0.0, 2.0, 500)
-estado_zoom = sol.sol(t_zoom)
-R_zoom = np.maximum(estado_zoom[0], 0.0)
-T_L_zoom = np.maximum(estado_zoom[1], 0.0)
-T_2_zoom = np.maximum(estado_zoom[2], 0.0)
-P_dCas9_zoom = np.maximum(estado_zoom[3], 0.0)
-P_BirA_zoom = np.maximum(estado_zoom[4], 0.0)
+# Estadisticos resumen (mediana, IC90% = percentiles 5 y 95)
+P_dCas9_mediana = np.median(mc_P_dCas9_20h)
+P_dCas9_p5 = np.percentile(mc_P_dCas9_20h, 5)
+P_dCas9_p95 = np.percentile(mc_P_dCas9_20h, 95)
 
-# --- Panel (2,1): ZOOM T7 RNAP, primeras 2h ---
-ax_R_zoom.plot(t_zoom, R_zoom, color="tab:brown", linewidth=2)
-ax_R_zoom.set_xlabel("Tiempo (h)")
-ax_R_zoom.set_ylabel("[T7 RNAP] (nM)")
-ax_R_zoom.set_title("(2,1) ZOOM T7 RNAP: primeras 2h")
-ax_R_zoom.grid(alpha=0.3)
+P_BirA_mediana = np.median(mc_P_BirA_20h)
+P_BirA_p5 = np.percentile(mc_P_BirA_20h, 5)
+P_BirA_p95 = np.percentile(mc_P_BirA_20h, 95)
 
-# --- Panel (2,2): ZOOM transcritos, primeras 2h ---
-ax_T_zoom.plot(t_zoom, T_L_zoom, color="tab:orange", linewidth=2, label="T_L")
-ax_T_zoom.plot(t_zoom, T_2_zoom, color="tab:cyan", linewidth=2, label="T_2")
-ax_T_zoom.set_xlabel("Tiempo (h)")
-ax_T_zoom.set_ylabel("Concentracion (nM)")
-ax_T_zoom.set_title("(2,2) ZOOM transcritos: primeras 2h")
-ax_T_zoom.legend(loc="best", fontsize=9)
-ax_T_zoom.grid(alpha=0.3)
+frac_BirA_suficiente = np.mean(mc_P_BirA_20h >= mc_P_dCas9_20h) * 100.0
 
-# --- Panel (2,3): ZOOM proteinas, primeras 2h ---
-ax_P_zoom.plot(t_zoom, P_dCas9_zoom, color="tab:green", linewidth=2, label="P_dCas9-AviTag")
-ax_P_zoom.plot(t_zoom, P_BirA_zoom, color="tab:purple", linewidth=2, label="P_BirA")
-ax_P_zoom.set_xlabel("Tiempo (h)")
-ax_P_zoom.set_ylabel("Concentracion (nM)")
-ax_P_zoom.set_title("(2,3) ZOOM proteinas: primeras 2h")
-ax_P_zoom.legend(loc="best", fontsize=9)
-ax_P_zoom.grid(alpha=0.3)
+# Bandas de IC90% a lo largo del tiempo (para la Figura 2)
+P_dCas9_traj_mediana = np.median(mc_P_dCas9_traj, axis=0)
+P_dCas9_traj_p5 = np.percentile(mc_P_dCas9_traj, 5, axis=0)
+P_dCas9_traj_p95 = np.percentile(mc_P_dCas9_traj, 95, axis=0)
+
+P_BirA_traj_mediana = np.median(mc_P_BirA_traj, axis=0)
+P_BirA_traj_p5 = np.percentile(mc_P_BirA_traj, 5, axis=0)
+P_BirA_traj_p95 = np.percentile(mc_P_BirA_traj, 95, axis=0)
+
+
+# =======================================================================
+# SECCION 7 - ANALISIS DE SENSIBILIDAD
+# =======================================================================
+# --- Sensibilidad 1: f_rt ---
+valores_f_rt = [0.05, 0.10, 0.20, 0.30, 0.50]
+P_BirA_20h_vs_frt = []
+for f_rt_i in valores_f_rt:
+    p_i = construir_params_16C(
+        IPTG_conc.value, K_IPTG.value, n_Hill.value, k_R_ref.value, Q10_tx.value,
+        delta_R_ref.value, Q10_delta_R.value, k_tx_ref.value, delta_m_ref.value,
+        Q10_delta_m.value, k_tl0_ref.value, RBS_str_1.value, RBS_str_2.value,
+        Q10_tl.value, delta_p_dCas9_ref.value, delta_p_BirA_ref.value, Q10_delta_p.value,
+        mu_ref.value, Q10_mu.value, f_rt_i,
+    )
+    sol_i = solve_ivp(sistema_odes, (0, T_END), Y0, method="Radau",
+                       t_eval=[T_END], args=(p_i,), rtol=1e-8, atol=1e-10)
+    P_BirA_20h_vs_frt.append(max(sol_i.y[4][-1], 0.0))
+
+# --- Sensibilidad 2: k_R_ref ---
+valores_k_R = [5.0, 10.0, 20.0, 35.0, 50.0]
+P_dCas9_20h_vs_kR = []
+P_BirA_20h_vs_kR = []
+for k_R_i in valores_k_R:
+    p_i = construir_params_16C(
+        IPTG_conc.value, K_IPTG.value, n_Hill.value, k_R_i, Q10_tx.value,
+        delta_R_ref.value, Q10_delta_R.value, k_tx_ref.value, delta_m_ref.value,
+        Q10_delta_m.value, k_tl0_ref.value, RBS_str_1.value, RBS_str_2.value,
+        Q10_tl.value, delta_p_dCas9_ref.value, delta_p_BirA_ref.value, Q10_delta_p.value,
+        mu_ref.value, Q10_mu.value, f_rt.value,
+    )
+    sol_i = solve_ivp(sistema_odes, (0, T_END), Y0, method="Radau",
+                       t_eval=[T_END], args=(p_i,), rtol=1e-8, atol=1e-10)
+    P_dCas9_20h_vs_kR.append(max(sol_i.y[3][-1], 0.0))
+    P_BirA_20h_vs_kR.append(max(sol_i.y[4][-1], 0.0))
+
+
+# =======================================================================
+# SECCION 8 - VISUALIZACION (4 figuras)
+# =======================================================================
+
+# --- Figura 1: Dinamica determinista (2x3) ---
+fig1, axes1 = plt.subplots(2, 3, figsize=(18, 10))
+fig1.suptitle("Modulo A v2.0 - Dinamica determinista (16C, 20h)", fontsize=14, fontweight="bold")
+
+axes1[0, 0].plot(t_horas, R_t, color="tab:brown", linewidth=2)
+axes1[0, 0].set_xlabel("Tiempo (h)"); axes1[0, 0].set_ylabel("[T7 RNAP] (nM)")
+axes1[0, 0].set_title("T7 RNAP - vista completa"); axes1[0, 0].grid(alpha=0.3)
+
+axes1[0, 1].plot(t_horas, T_L_t, color="tab:orange", linewidth=2, label="T_L")
+axes1[0, 1].plot(t_horas, T_2_t, color="tab:cyan", linewidth=2, label="T_2")
+axes1[0, 1].set_xlabel("Tiempo (h)"); axes1[0, 1].set_ylabel("Concentracion (nM)")
+axes1[0, 1].set_title("Transcritos - vista completa"); axes1[0, 1].legend(fontsize=9); axes1[0, 1].grid(alpha=0.3)
+
+axes1[0, 2].plot(t_horas, P_dCas9_t, color="tab:green", linewidth=2, label="P_dCas9-AviTag")
+axes1[0, 2].plot(t_horas, P_BirA_t, color="tab:purple", linewidth=2, label="P_BirA")
+axes1[0, 2].set_xlabel("Tiempo (h)"); axes1[0, 2].set_ylabel("Concentracion (nM)")
+axes1[0, 2].set_title("Proteinas - vista completa"); axes1[0, 2].legend(fontsize=9); axes1[0, 2].grid(alpha=0.3)
+
+mascara_zoom = t_horas <= 2.0
+axes1[1, 0].plot(t_horas[mascara_zoom], R_t[mascara_zoom], color="tab:brown", linewidth=2)
+axes1[1, 0].set_xlabel("Tiempo (h)"); axes1[1, 0].set_ylabel("[T7 RNAP] (nM)")
+axes1[1, 0].set_title("ZOOM T7 RNAP: primeras 2h"); axes1[1, 0].grid(alpha=0.3)
+
+axes1[1, 1].plot(t_horas[mascara_zoom], T_L_t[mascara_zoom], color="tab:orange", linewidth=2, label="T_L")
+axes1[1, 1].plot(t_horas[mascara_zoom], T_2_t[mascara_zoom], color="tab:cyan", linewidth=2, label="T_2")
+axes1[1, 1].set_xlabel("Tiempo (h)"); axes1[1, 1].set_ylabel("Concentracion (nM)")
+axes1[1, 1].set_title("ZOOM transcritos: primeras 2h"); axes1[1, 1].legend(fontsize=9); axes1[1, 1].grid(alpha=0.3)
+
+axes1[1, 2].plot(t_horas[mascara_zoom], P_dCas9_t[mascara_zoom], color="tab:green", linewidth=2, label="P_dCas9-AviTag")
+axes1[1, 2].plot(t_horas[mascara_zoom], P_BirA_t[mascara_zoom], color="tab:purple", linewidth=2, label="P_BirA")
+axes1[1, 2].set_xlabel("Tiempo (h)"); axes1[1, 2].set_ylabel("Concentracion (nM)")
+axes1[1, 2].set_title("ZOOM proteinas: primeras 2h"); axes1[1, 2].legend(fontsize=9); axes1[1, 2].grid(alpha=0.3)
 
 plt.tight_layout(rect=[0, 0, 1, 0.95])
-plt.savefig("ModuloA_dinamica_completa.png", dpi=150)
-print("\nFigura guardada como: ModuloA_dinamica_completa.png")
+plt.savefig("ModuloA_v2_dinamica_completa.png", dpi=150)
+print("\nFigura guardada: ModuloA_v2_dinamica_completa.png")
 
-
-# =======================================================================
-# VISUALIZACION - FIGURA 2: OUTPUTS PARA INTEGRACION
-# =======================================================================
+# --- Figura 2: Outputs para integracion, con banda IC90% Monte Carlo ---
 fig2, (ax_dcas9, ax_bira) = plt.subplots(1, 2, figsize=(14, 6))
-fig2.suptitle("Modulo A - Outputs para integracion con Modulos B y C", fontsize=14, fontweight="bold")
+fig2.suptitle("Modulo A v2.0 - Outputs para integracion (con incertidumbre Monte Carlo)", fontsize=14, fontweight="bold")
 
-# --- Panel izquierdo: P_dCas9 total vs P_dCas9 x phi(16C) ---
-P_dCas9_funcional_t = P_dCas9_t * phi_16
-ax_dcas9.plot(t_horas, P_dCas9_t, color="tab:green", linewidth=2, linestyle="-", label="P_dCas9-AviTag total")
-ax_dcas9.plot(t_horas, P_dCas9_funcional_t, color="tab:green", linewidth=2, linestyle=":", label=f"P_dCas9-AviTag x phi(16C={phi_16})")
+P_dCas9_funcional_t = P_dCas9_t * phi_16.value
+ax_dcas9.fill_between(t_eval_mc, P_dCas9_traj_p5, P_dCas9_traj_p95, color="tab:green", alpha=0.2, label="IC90% Monte Carlo")
+ax_dcas9.plot(t_horas, P_dCas9_t, color="tab:green", linewidth=2, linestyle="-", label="P_dCas9 total (nominal)")
+ax_dcas9.plot(t_horas, P_dCas9_funcional_t, color="tab:green", linewidth=2, linestyle=":", label=f"P_dCas9 x phi_16={phi_16.value}")
 ax_dcas9.axvline(20.0, color="gray", linestyle="--", linewidth=1)
-ax_dcas9.text(20.0, ax_dcas9.get_ylim()[1] * 0.05, " Output -> Modulo C", rotation=90, va="bottom", ha="right", fontsize=8, color="gray")
-ax_dcas9.set_xlabel("Tiempo (h)")
-ax_dcas9.set_ylabel("Concentracion (nM)")
-ax_dcas9.set_title("dCas9-AviTag: total vs. fraccion funcional")
-ax_dcas9.legend(loc="upper left", fontsize=9)
-ax_dcas9.grid(alpha=0.3)
+ax_dcas9.set_xlabel("Tiempo (h)"); ax_dcas9.set_ylabel("Concentracion (nM)")
+ax_dcas9.set_title("dCas9-AviTag: total vs. funcional, con incertidumbre")
+ax_dcas9.legend(loc="upper left", fontsize=8); ax_dcas9.grid(alpha=0.3)
 
-# --- Panel derecho: P_BirA(t) ---
-P_BirA_20h = P_BirA_t[-1]
-ax_bira.plot(t_horas, P_BirA_t, color="tab:purple", linewidth=2, label="P_BirA")
+ax_bira.fill_between(t_eval_mc, P_BirA_traj_p5, P_BirA_traj_p95, color="tab:purple", alpha=0.2, label="IC90% Monte Carlo")
+ax_bira.plot(t_horas, P_BirA_t, color="tab:purple", linewidth=2, label="P_BirA (nominal)")
 ax_bira.axvline(20.0, color="gray", linestyle="--", linewidth=1)
-ax_bira.text(20.0, P_BirA_20h * 0.05, " Output -> Modulo B", rotation=90, va="bottom", ha="right", fontsize=8, color="gray")
-ax_bira.annotate(f"P_BirA(20h) = {P_BirA_20h:.2f} nM",
-                  xy=(20.0, P_BirA_20h), xytext=(12.0, P_BirA_20h * 0.85),
-                  fontsize=9, color="tab:purple",
-                  arrowprops=dict(arrowstyle="->", color="tab:purple", lw=1))
-ax_bira.set_xlabel("Tiempo (h)")
-ax_bira.set_ylabel("Concentracion (nM)")
-ax_bira.set_title("BirA total")
-ax_bira.legend(loc="upper left", fontsize=9)
-ax_bira.grid(alpha=0.3)
+ax_bira.annotate(f"P_BirA(20h) = {P_BirA_20h_det:.2f} nM\n[IC90%: {P_BirA_p5:.2f}-{P_BirA_p95:.2f}]",
+                  xy=(20.0, P_BirA_20h_det), xytext=(11.0, P_BirA_20h_det * 0.6),
+                  fontsize=8.5, color="tab:purple", arrowprops=dict(arrowstyle="->", color="tab:purple"))
+ax_bira.set_xlabel("Tiempo (h)"); ax_bira.set_ylabel("Concentracion (nM)")
+ax_bira.set_title("BirA total, con incertidumbre")
+ax_bira.legend(loc="upper left", fontsize=8); ax_bira.grid(alpha=0.3)
 
-plt.tight_layout(rect=[0, 0, 1, 0.94])
-plt.savefig("ModuloA_outputs_integracion.png", dpi=150)
-print("Figura guardada como: ModuloA_outputs_integracion.png")
+plt.tight_layout(rect=[0, 0, 1, 0.93])
+plt.savefig("ModuloA_v2_outputs_integracion.png", dpi=150)
+print("Figura guardada: ModuloA_v2_outputs_integracion.png")
 
+# --- Figura 3: Sensibilidad a f_rt y k_R ---
+fig3, (ax_frt, ax_kr) = plt.subplots(1, 2, figsize=(14, 6))
+fig3.suptitle("Modulo A v2.0 - Analisis de sensibilidad", fontsize=14, fontweight="bold")
 
-# =======================================================================
-# VISUALIZACION - FIGURA 3: SENSIBILIDAD DE P_BirA(20h) A f_rt
-# =======================================================================
-valores_f_rt = [0.05, 0.10, 0.20, 0.30, 0.50]
-P_BirA_20h_por_frt = []
+ax_frt.plot(valores_f_rt, P_BirA_20h_vs_frt, marker="o", markersize=8, color="tab:purple", linewidth=2, label="P_BirA(20h)")
+ax_frt.axhline(P_dCas9_20h_det, color="tab:green", linestyle="--", linewidth=1.5, label=f"P_dCas9(20h) = {P_dCas9_20h_det:.2f} nM")
+ax_frt.set_xlabel("f_rt"); ax_frt.set_ylabel("P_BirA(20h) (nM)")
+ax_frt.set_title("Sensibilidad a f_rt"); ax_frt.legend(fontsize=9); ax_frt.grid(alpha=0.3)
 
-for f_rt_i in valores_f_rt:
-    parametros_i = dict(parametros_odes)   # copia de los parametros base
-    parametros_i["f_rt"] = f_rt_i
-    sol_i = solve_ivp(
-        fun=sistema_odes,
-        t_span=(t_start, t_end),
-        y0=y0,
-        method="Radau",
-        t_eval=[t_end],   # solo se necesita el valor final en t=20h
-        args=(parametros_i,),
-        rtol=1e-8,
-        atol=1e-10,
-    )
-    P_BirA_20h_i = max(sol_i.y[4][-1], 0.0)
-    P_BirA_20h_por_frt.append(P_BirA_20h_i)
+ax_kr.plot(valores_k_R, P_dCas9_20h_vs_kR, marker="o", markersize=8, color="tab:green", linewidth=2, label="P_dCas9(20h)")
+ax_kr.plot(valores_k_R, P_BirA_20h_vs_kR, marker="s", markersize=8, color="tab:purple", linewidth=2, label="P_BirA(20h)")
+ax_kr.axvline(k_R_ref.value, color="gray", linestyle=":", linewidth=1.5, label=f"Valor nominal (k_R={k_R_ref.value})")
+ax_kr.set_xlabel("k_R_ref (nM/h)"); ax_kr.set_ylabel("Concentracion a 20h (nM)")
+ax_kr.set_title("Sensibilidad a k_R_ref"); ax_kr.legend(fontsize=9); ax_kr.grid(alpha=0.3)
 
-P_dCas9_20h = P_dCas9_t[-1]   # referencia 1:1 para la Figura 3
+plt.tight_layout(rect=[0, 0, 1, 0.93])
+plt.savefig("ModuloA_v2_sensibilidad.png", dpi=150)
+print("Figura guardada: ModuloA_v2_sensibilidad.png")
 
-fig3, ax_sens = plt.subplots(1, 1, figsize=(9, 6.5))
-ax_sens.plot(valores_f_rt, P_BirA_20h_por_frt, marker="o", markersize=8, color="tab:purple",
-             linewidth=2, label="P_BirA(20h) simulado")
-ax_sens.axhline(P_dCas9_20h, color="tab:green", linestyle="--", linewidth=1.5,
-                 label=f"P_dCas9(20h) = {P_dCas9_20h:.2f} nM (referencia 1:1)")
-ax_sens.set_xlabel("f_rt (fraccion de read-through)")
-ax_sens.set_ylabel("P_BirA(20h) (nM)")
-ax_sens.set_title("Sensibilidad de P_BirA(20h) al parametro de read-through f_rt")
-ax_sens.legend(loc="best", fontsize=9)
-ax_sens.grid(alpha=0.3)
-# Este analisis justifica el valor de f_rt elegido: se busca el minimo f_rt
-# que garantiza P_BirA(20h) >= P_dCas9(20h), condicion necesaria (aunque no
-# suficiente) para biotinilacion completa de todo el dCas9-AviTag producido.
+# --- Figura 4: Histogramas Monte Carlo ---
+fig4, (ax_h1, ax_h2) = plt.subplots(1, 2, figsize=(14, 6))
+fig4.suptitle(f"Distribucion Monte Carlo (N={n_exitosas}) - Modulo A v2.0", fontsize=14, fontweight="bold")
 
-plt.tight_layout()
-plt.savefig("ModuloA_sensibilidad_frt.png", dpi=150)
-print("Figura guardada como: ModuloA_sensibilidad_frt.png")
+ax_h1.hist(mc_P_dCas9_20h, bins=30, color="tab:green", alpha=0.7, edgecolor="black")
+ax_h1.axvline(P_dCas9_mediana, color="black", linewidth=2, label=f"Mediana = {P_dCas9_mediana:.2f} nM")
+ax_h1.axvline(P_dCas9_p5, color="black", linestyle="--", linewidth=1, label=f"P5 = {P_dCas9_p5:.2f} nM")
+ax_h1.axvline(P_dCas9_p95, color="black", linestyle="--", linewidth=1, label=f"P95 = {P_dCas9_p95:.2f} nM")
+ax_h1.set_xlabel("P_dCas9(20h) (nM)"); ax_h1.set_ylabel("Frecuencia")
+ax_h1.set_title("Distribucion de P_dCas9(20h)"); ax_h1.legend(fontsize=8); ax_h1.grid(alpha=0.3)
+
+ax_h2.hist(mc_P_BirA_20h, bins=30, color="tab:purple", alpha=0.7, edgecolor="black")
+ax_h2.axvline(P_BirA_mediana, color="black", linewidth=2, label=f"Mediana = {P_BirA_mediana:.2f} nM")
+ax_h2.axvline(P_BirA_p5, color="black", linestyle="--", linewidth=1, label=f"P5 = {P_BirA_p5:.2f} nM")
+ax_h2.axvline(P_BirA_p95, color="black", linestyle="--", linewidth=1, label=f"P95 = {P_BirA_p95:.2f} nM")
+ax_h2.set_xlabel("P_BirA(20h) (nM)"); ax_h2.set_ylabel("Frecuencia")
+ax_h2.set_title("Distribucion de P_BirA(20h)"); ax_h2.legend(fontsize=8); ax_h2.grid(alpha=0.3)
+
+plt.tight_layout(rect=[0, 0, 1, 0.93])
+plt.savefig("ModuloA_v2_montecarlo.png", dpi=150)
+print("Figura guardada: ModuloA_v2_montecarlo.png")
 
 plt.show()
 
 
 # =======================================================================
-# OUTPUT EN CONSOLA
+# SECCION 9 - OUTPUT DE CONSOLA
 # =======================================================================
 print("\n" + "=" * 90)
-print("OUTPUT PARA INTEGRACION - MODULO A")
+print("1. TABLA DE TODOS LOS PARAMETROS")
 print("=" * 90)
 
-# (a) Tabla comparativa de parametros (repetida aqui para tenerla en el resumen final)
-print("\n(a) Tabla comparativa de parametros 37C vs 16C:")
-imprimir_tabla_parametros()
+# Parametros con correccion Q10 explicita (constantes cineticas de temperatura)
+params_con_q10 = [
+    ("k_R_ref", k_R_ref, Q10_tx),
+    ("delta_R_ref", delta_R_ref, Q10_delta_R),
+    ("k_tx_ref", k_tx_ref, Q10_tx),
+    ("delta_m_ref", delta_m_ref, Q10_delta_m),
+    ("k_tl0_ref", k_tl0_ref, Q10_tl),
+    ("delta_p_dCas9_ref", delta_p_dCas9_ref, Q10_delta_p),
+    ("delta_p_BirA_ref", delta_p_BirA_ref, Q10_delta_p),
+    ("mu_ref", mu_ref, Q10_mu),
+]
 
-# (b) y (c) P_dCas9(20h) y fraccion funcional
-P_dCas9_20h = P_dCas9_t[-1]
-P_dCas9_funcional_20h = P_dCas9_20h * phi_16
-print(f"\n(b) P_dCas9(20h): {P_dCas9_20h:.3f} nM  # -> Output para Modulo C (proteina total)")
-print(f"(c) P_dCas9(20h) x phi(16C={phi_16}): {P_dCas9_funcional_20h:.3f} nM  "
-      f"# -> Output para Modulo C (proteina funcional plegada)")
+print(f"{'Nombre':<20s}{'Valor(37C)':>12s}{'Valor(16C)':>12s}{'Q10':>8s}{'Origin':>14s}{'rel_unc':>10s}")
+print("-" * 90)
+for nombre, param_obj, q10_obj in params_con_q10:
+    v16 = ajustar_Q10(param_obj.value, q10_obj.value, T_exp.value, T_ref.value)
+    print(f"{nombre:<20s}{param_obj.value:>12.4f}{v16:>12.4f}{q10_obj.value:>8.2f}{param_obj.origin:>14s}{param_obj.rel_unc:>9.0%}")
 
-# (d) P_BirA(20h)
-P_BirA_20h = P_BirA_t[-1]
-print(f"(d) P_BirA(20h): {P_BirA_20h:.3f} nM  # -> Output para Modulo B (BirA_0)")
-
-# (e) Relacion estequiometrica
-relacion_dcas9_bira = P_dCas9_20h / P_BirA_20h if P_BirA_20h > 0 else float("inf")
-print(f"(e) Relacion P_dCas9(20h) : P_BirA(20h) = 1 : {P_BirA_20h / P_dCas9_20h:.2f}  "
-      f"(equivalente a P_dCas9/P_BirA = {relacion_dcas9_bira:.3f})")
-
-
-def tiempo_para_pct_maximo(pct_objetivo, t_arr, y_arr):
-    """
-    Interpola el tiempo (en horas) en el que una serie y_arr alcanza un
-    porcentaje objetivo de su valor MAXIMO dentro del rango simulado.
-    """
-    y_max = np.max(y_arr)
-    if y_max <= 0:
-        return None
-    objetivo = pct_objetivo * y_max
-    if y_arr[-1] < objetivo:
-        return None
-    return np.interp(objetivo, y_arr, t_arr)
-
-
-# (f) Tiempo para 50% y 90% del valor maximo de cada proteina
-print("\n(f) Tiempo para alcanzar 50% y 90% del valor maximo de cada proteina:")
-for nombre_especie, y_arr in [("P_dCas9-AviTag", P_dCas9_t), ("P_BirA", P_BirA_t)]:
-    t_50 = tiempo_para_pct_maximo(0.50, t_horas, y_arr)
-    t_90 = tiempo_para_pct_maximo(0.90, t_horas, y_arr)
-    t_50_str = f"{t_50:.2f} h" if t_50 is not None else "no alcanzado"
-    t_90_str = f"{t_90:.2f} h" if t_90 is not None else "no alcanzado"
-    print(f"    {nombre_especie:<16s} 50%: {t_50_str:<14s} 90%: {t_90_str}")
-
-# (g) Estado del sistema a t=20h: ¿plateau o aun acumulando?
-print("\n(g) Estado del sistema a t=20h (comparando dP/dt en t=20h vs el maximo dP/dt observado):")
-derivadas_finales = sistema_odes(t_end, [R_t[-1], T_L_t[-1], T_2_t[-1], P_dCas9_t[-1], P_BirA_t[-1]], parametros_odes)
-nombres_especies = ["R (T7 RNAP)", "T_L", "T_2", "P_dCas9-AviTag", "P_BirA"]
-series_especies = [R_t, T_L_t, T_2_t, P_dCas9_t, P_BirA_t]
-
-advertencias_plateau = []
-for nombre_especie, y_arr, dydt_final in zip(nombres_especies, series_especies, derivadas_finales):
-    dydt_serie = np.gradient(y_arr, t_horas)
-    dydt_max = np.max(np.abs(dydt_serie))
-    if dydt_max > 0:
-        pct_derivada_final = abs(dydt_final) / dydt_max * 100.0
-    else:
-        pct_derivada_final = 0.0
-    estado = "EN PLATEAU (< 5% del dP/dt maximo)" if pct_derivada_final < 5.0 else "AUN ACUMULANDO"
-    print(f"    {nombre_especie:<16s} dP/dt(20h) = {pct_derivada_final:5.1f}% del maximo -> {estado}")
-
-    # Verificacion adicional: ¿la especie llego a 95% de su valor final antes de t=10h?
-    idx_10h = np.argmin(np.abs(t_horas - 10.0))
-    valor_10h = y_arr[idx_10h]
-    valor_final = y_arr[-1]
-    if valor_final > 0 and (valor_10h / valor_final) > 0.95:
-        advertencias_plateau.append(nombre_especie)
-
-if advertencias_plateau:
-    print(f"\n    ADVERTENCIA: las siguientes especies alcanzaron >95% de su valor final "
-          f"de t=20h ANTES de t=10h: {', '.join(advertencias_plateau)}.")
-    print("    Esto sugiere que, para esas especies, la degradacion y/o dilucion son")
-    print("    relativamente rapidas frente a la sintesis a 16C, alcanzando el estado")
-    print("    estacionario bastante antes del final de la induccion. Si esto no es lo")
-    print("    esperado biologicamente, revisar los valores de Q10 de degradacion/sintesis")
-    print("    correspondientes.")
-else:
-    print("\n    Ninguna especie parece haber alcanzado plateau antes de t=10h.")
-
-# (h) Advertencia si P_BirA(20h) < P_dCas9(20h)
+# Parametros de Q10 en si mismos, y parametros sin escalado por temperatura
 print()
-if P_BirA_20h < P_dCas9_20h:
-    print(f"(h) ADVERTENCIA: P_BirA(20h) = {P_BirA_20h:.3f} nM es MENOR que "
-          f"P_dCas9(20h) = {P_dCas9_20h:.3f} nM. Esto significa que, en el peor caso "
-          f"(1 BirA por 1 dCas9-AviTag), podria no haber suficiente BirA para "
-          f"biotinilar todo el dCas9-AviTag producido. Considerar aumentar f_rt o la "
-          f"fuerza de RBS2.")
-else:
-    print(f"(h) P_BirA(20h) = {P_BirA_20h:.3f} nM >= P_dCas9(20h) = {P_dCas9_20h:.3f} nM: "
-          f"hay suficiente BirA (en base molar) para, en principio, biotinilar todo "
-          f"el dCas9-AviTag producido.")
+print(f"{'Nombre':<20s}{'Valor':>12s}{'Unidad':>14s}{'Origin':>14s}{'rel_unc':>10s}")
+print("-" * 90)
+otros = ["T_exp", "T_ref", "IPTG_conc", "K_IPTG", "n_Hill", "Q10_tx", "Q10_delta_R",
+         "Q10_delta_m", "Q10_tl", "Q10_delta_p", "Q10_mu", "RBS_str_1", "RBS_str_2",
+         "f_rt", "phi_16", "phi_37"]
+for nombre in otros:
+    param_obj = TODOS_LOS_PARAMS[nombre]
+    print(f"{nombre:<20s}{param_obj.value:>12.4g}{param_obj.unit:>14s}{param_obj.origin:>14s}{param_obj.rel_unc:>9.0%}")
 
-# (i) Comentario sobre el impacto de f_rt
-print(f"\n(i) Con f_rt = {f_rt}, el transcrito largo T_L contribuye "
-      f"{f_rt*100:.0f}% de su concentracion a la traduccion de BirA (ademas del 100% "
-      f"del transcrito corto T_2). El analisis de sensibilidad (Figura 3) muestra como "
-      f"cambia P_BirA(20h) al variar f_rt entre 0.05 y 0.50, y permite identificar el "
-      f"valor minimo de f_rt necesario para mantener P_BirA(20h) >= P_dCas9(20h).")
+print("\n" + "=" * 90)
+print("2. PARAMETROS WETLAB_PEND / PLACEHOLDER (con nota de que medir)")
+print("=" * 90)
+for nombre, param_obj in TODOS_LOS_PARAMS.items():
+    if param_obj.origin in ("WETLAB_PEND", "PLACEHOLDER") and param_obj.wet_lab_note:
+        print(f"\n[{param_obj.origin}] {nombre} = {param_obj.value} {param_obj.unit}")
+        print(f"  -> {param_obj.wet_lab_note}")
+
+print("\n" + "=" * 90)
+print("3. RESULTADOS DETERMINISTICOS (corrida nominal)")
+print("=" * 90)
+print(f"P_dCas9(20h)                 = {P_dCas9_20h_det:.3f} nM  -> Modulo C (total)")
+print(f"P_dCas9(20h) x phi_16        = {P_dCas9_20h_det * phi_16.value:.3f} nM  -> Modulo C (funcional)")
+print(f"P_BirA(20h)                  = {P_BirA_20h_det:.3f} nM  -> Modulo B")
+print(f"Relacion P_dCas9 : P_BirA    = 1 : {P_BirA_20h_det / P_dCas9_20h_det:.3f}")
+
+dydt_final = sistema_odes(T_END, [R_t[-1], T_L_t[-1], T_2_t[-1], P_dCas9_t[-1], P_BirA_t[-1]], params_nom)
+dP_dCas9_dt_serie = np.gradient(P_dCas9_t, t_horas)
+pct_deriv_final = abs(dydt_final[3]) / np.max(np.abs(dP_dCas9_dt_serie)) * 100.0
+estado_txt = "EN PLATEAU" if pct_deriv_final < 5.0 else "AUN ACUMULANDO"
+print(f"Estado de P_dCas9 a t=20h    = {estado_txt} (dP/dt al {pct_deriv_final:.1f}% del maximo)")
+
+print("\n" + "=" * 90)
+print("4. RESULTADOS MONTE CARLO (N={} exitosas)".format(n_exitosas))
+print("=" * 90)
+print(f"P_dCas9(20h) = {P_dCas9_mediana:.2f} nM  [IC90%: {P_dCas9_p5:.2f} - {P_dCas9_p95:.2f} nM]")
+print(f"P_BirA(20h)  = {P_BirA_mediana:.2f} nM  [IC90%: {P_BirA_p5:.2f} - {P_BirA_p95:.2f} nM]")
+print(f"% de corridas donde P_BirA(20h) >= P_dCas9(20h): {frac_BirA_suficiente:.1f}%")
+
+print("\n" + "=" * 90)
+print("5. ADVERTENCIA DE ESTEQUIOMETRIA")
+print("=" * 90)
+if P_BirA_20h_det < P_dCas9_20h_det:
+    print(f"ADVERTENCIA: en la corrida determinista nominal, P_BirA(20h)={P_BirA_20h_det:.2f} nM "
+          f"es MENOR que P_dCas9(20h)={P_dCas9_20h_det:.2f} nM. Esto podria dejar dCas9-AviTag "
+          f"sin biotinilar. El Monte Carlo indica que esto ocurre en el {100-frac_BirA_suficiente:.1f}% "
+          f"de las combinaciones de parametros muestreadas.")
+else:
+    print(f"P_BirA(20h)={P_BirA_20h_det:.2f} nM >= P_dCas9(20h)={P_dCas9_20h_det:.2f} nM en la "
+          f"corrida nominal: en principio hay suficiente BirA. El Monte Carlo confirma esto en "
+          f"el {frac_BirA_suficiente:.1f}% de las combinaciones muestreadas.")
+
+print("\n" + "=" * 90)
+print("6. PARAMETROS QUE REQUIEREN MEDICION EXPERIMENTAL (por prioridad)")
+print("=" * 90)
+prioridad = [
+    ("CRITICA", "f_rt", f_rt),
+    ("CRITICA", "k_R_ref", k_R_ref),
+    ("ALTA", "phi_16", phi_16),
+    ("ALTA", "phi_37", phi_37),
+    ("MEDIA", "RBS_str_1", RBS_str_1),
+    ("MEDIA", "RBS_str_2", RBS_str_2),
+    ("MEDIA", "K_IPTG", K_IPTG),
+    ("MEDIA", "delta_p_BirA_ref", delta_p_BirA_ref),
+    ("BAJA", "mu_ref", mu_ref),
+]
+for nivel, nombre, param_obj in prioridad:
+    print(f"  [{nivel:<8s}] {nombre:<20s} nota: {param_obj.wet_lab_note or '(sin nota especifica)'}")
 
 print("=" * 90)
-
-
-# =======================================================================
-# SECCION DE INTEGRACION CON MODULOS SIGUIENTES
-# =======================================================================
-#
-#   1. P_dCas9(20h) x phi(16C) (calculado arriba) se pasa al Modulo C como
-#      P_total_disponible: la cantidad de proteina dCas9-AviTag
-#      correctamente plegada, disponible para el proceso de purificacion.
-#
-#   2. P_BirA(20h) se pasa al Modulo B como BirA_0, REEMPLAZANDO el valor
-#      provisional de 1 uM (1000 nM) que se uso en la version standalone
-#      de ese modulo. Nota de unidades: Modulo B trabaja en M, este
-#      modulo trabaja en nM; recordar convertir (1 nM = 1e-9 M) al pasar
-#      el valor entre modulos.
-#
-#   3. Cuando WetLab mida phi(16C) real (SDS-PAGE de fraccion soluble),
-#      el UNICO cambio necesario es actualizar el parametro phi_16 en
-#      este script; el resto del pipeline se recalcula automaticamente.
-#
-#   4. Cuando WetLab mida f_rt real (RT-qPCR comparando abundancia de
-#      dCas9 vs. BirA en el ARNm), el UNICO cambio necesario es actualizar
-#      el parametro f_rt en este script.
-#
-#   5. La relacion P_dCas9(20h) : P_BirA(20h) es un CPP (Critical Process
-#      Parameter) del sistema QbD: cuantifica si el diseno genetico
-#      (dos promotores T7 + read-through) esta logrando su objetivo de
-#      amplificar la produccion de BirA respecto a dCas9-AviTag.
-#
-# =======================================================================
-
-
-# =======================================================================
-# NOTAS SOBRE DISENO Y ROBUSTEZ NUMERICA
-# =======================================================================
-#
-# ¿POR QUE SE USO EL METODO RADAU EN LUGAR DE RK45?
-# -----------------------------------------------------------------------
-# Este sistema de 5 ODEs es "stiff" (rigido): las escalas de tiempo de
-# las distintas especies difieren en varios ordenes de magnitud dentro
-# del mismo sistema. Por ejemplo, la degradacion de ARNm (delta_m, del
-# orden de horas^-1 incluso a 16C) es mucho mas rapida que la dilucion
-# por crecimiento celular (mu, mucho mas lenta a 16C). Un integrador
-# explicito como RK45 necesitaria pasos de tiempo extremadamente
-# pequenos para mantenerse estable frente al proceso mas rapido del
-# sistema, incluso cuando se esta simulando la evolucion del proceso mas
-# lento — esto lo vuelve computacionalmente ineficiente o inestable.
-#
-# Radau es un metodo IMPLICITO (de la familia Runge-Kutta), disenado
-# especificamente para sistemas stiff: puede tomar pasos de tiempo mucho
-# mas grandes sin perder estabilidad numerica, porque resuelve un
-# sistema de ecuaciones (generalmente no lineal) en cada paso en lugar
-# de solo evaluar la derivada hacia adelante. Es mas costoso por paso,
-# pero mucho mas eficiente en total para este tipo de sistemas.
-#
-# ¿QUE SIGNIFICA "STIFF" EN ESTE CONTEXTO BIOLOGICO?
-# -----------------------------------------------------------------------
-# En terminos biologicos, "stiff" refleja que este sistema tiene
-# procesos "rapidos" (degradacion de ARNm, con vida media de minutos
-# incluso a 16C) acoplados a procesos "lentos" (crecimiento celular y
-# acumulacion de proteina estable, en la escala de horas). Matematicamente,
-# esto se traduce en autovalores del sistema linealizado que difieren en
-# varios ordenes de magnitud, lo cual es la definicion tecnica de
-# "stiffness" en ecuaciones diferenciales.
-#
-# ¿COMO INTERPRETAR SI LAS CURVAS MUESTRAN PLATEAU ANTES DE t=20h?
-# -----------------------------------------------------------------------
-# El sistema imprime automaticamente una advertencia (seccion "g" del
-# output) si alguna especie alcanza mas del 95% de su valor final antes
-# de t=10h. Esto NO es necesariamente un error: T7 RNAP y los transcritos
-# tienen tiempos de relajacion mas cortos que las proteinas (por el efecto
-# de "cascada" en la expresion genica, cada capa aguas abajo tarda mas en
-# alcanzar su estado estacionario). Sin embargo, si TODAS las especies
-# (incluyendo las proteinas finales) muestran plateau muy temprano, esto
-# podria indicar que las tasas de degradacion/dilucion ajustadas a 16C
-# son proporcionalmente muy altas frente a las tasas de sintesis, lo cual
-# valdria la pena revisar contra los valores de Q10 usados (especialmente
-# Q10_delta_m y Q10_delta_p, que determinan que tan rapido decae la
-# "memoria" de sintesis previa).
-#
-# ¿POR QUE EL MODELO NO INCLUYE EL EFECTO DE PLEGAMIENTO EN LAS ODEs?
-# -----------------------------------------------------------------------
-# El factor de plegamiento phi(T) describe que FRACCION de las moleculas
-# de dCas9-AviTag ya sintetizadas terminan en una conformacion
-# correctamente plegada y funcional, en oposicion a quedar atrapadas en
-# cuerpos de inclusion (agregados insolubles). Este es un proceso que
-# ocurre "en paralelo" a la sintesis, determinado principalmente por la
-# velocidad de sintesis, la temperatura, y la propia secuencia de la
-# proteina — no es una reaccion cinetica adicional de conversion entre
-# dos estados moleculares que dependa explicitamente del tiempo de forma
-# sencilla de modelar sin datos experimentales detallados de cinetica de
-# plegamiento (que no estan disponibles). Por eso se modela como un
-# FACTOR EXTERNO fijo que se aplica sobre la salida final P_dCas9(20h)
-# en lugar de como una ODE adicional: esto captura el efecto neto
-# (fraccion funcional final) sin necesitar asumir una cinetica de
-# plegamiento especifica que no esta respaldada por datos propios del
-# equipo. Cuando WetLab mida phi(16C) experimentalmente (SDS-PAGE de
-# fraccion soluble vs. insoluble), ese valor unico reemplaza el
-# parametro y ajusta automaticamente todo el pipeline aguas abajo
-# (Modulo C en adelante).
-# =======================================================================
